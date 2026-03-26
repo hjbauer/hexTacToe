@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, Optional
+
+import numpy as np
+
+from backend.game.game_state import Coord, GameState
+from backend.game.hex_coord import centroid, hex_distance
+from backend.game.rules import get_legal_moves
+
+try:
+    import torch
+    from torch_geometric.data import Data
+except ImportError:  # pragma: no cover
+    torch = None
+    Data = None
+
+
+@dataclass
+class GNNExperience:
+    node_features: np.ndarray
+    edge_index: np.ndarray
+    edge_attr: np.ndarray
+    node_coords: np.ndarray
+    is_legal: np.ndarray
+    mcts_probs: np.ndarray
+    outcome: float
+    turn_number: int
+
+
+class GraphBuilder:
+    def __init__(self, max_distance_norm: float = 8.0):
+        self.max_distance_norm = max_distance_norm
+
+    def _node_features(
+        self,
+        state: GameState,
+        node_coords: list[Coord],
+        legal_moves: set[Coord],
+    ) -> np.ndarray:
+        occupied = list(state.all_hexes)
+        centroid_q, centroid_r = centroid(occupied)
+        placements_remaining = state.placements_remaining_this_turn / 2.0
+        turn_norm = state.turn_number / 200.0
+        hexes_required_norm = state.hexes_required_this_turn / 6.0
+        current_player_is_red = 1.0 if state.current_player == "red" else 0.0
+
+        features: list[list[float]] = []
+        for q, r in node_coords:
+            is_red = 1.0 if (q, r) in state.red_hexes else 0.0
+            is_blue = 1.0 if (q, r) in state.blue_hexes else 0.0
+            is_empty_legal = 1.0 if (q, r) in legal_moves else 0.0
+            is_last_move = 1.0 if (q, r) in state.last_move_hexes else 0.0
+            if is_red or is_blue:
+                nearest_norm = 0.0
+            else:
+                occupied_distances = [
+                    hex_distance(q, r, oq, or_)
+                    for oq, or_ in occupied
+                ] or [0]
+                nearest_norm = min(occupied_distances) / self.max_distance_norm
+            features.append(
+                [
+                    (q - centroid_q) / self.max_distance_norm,
+                    (r - centroid_r) / self.max_distance_norm,
+                    is_red,
+                    is_blue,
+                    is_empty_legal,
+                    is_last_move,
+                    current_player_is_red,
+                    placements_remaining,
+                    turn_norm,
+                    hexes_required_norm,
+                    nearest_norm,
+                ]
+            )
+        return np.asarray(features, dtype=np.float32)
+
+    def _edge_index_and_attr(self, node_coords: list[Coord]) -> tuple[np.ndarray, np.ndarray]:
+        edges: list[list[int]] = []
+        edge_attr: list[list[float]] = []
+        for src, (sq, sr) in enumerate(node_coords):
+            for dst, (dq, dr) in enumerate(node_coords):
+                if src == dst:
+                    continue
+                distance = hex_distance(sq, sr, dq, dr)
+                if distance <= 2:
+                    edges.append([src, dst])
+                    edge_attr.append([distance / 2.0])
+        if not edges:
+            return (
+                np.zeros((2, 0), dtype=np.int64),
+                np.zeros((0, 1), dtype=np.float32),
+            )
+        return (
+            np.asarray(edges, dtype=np.int64).T,
+            np.asarray(edge_attr, dtype=np.float32),
+        )
+
+    def build_experience(
+        self,
+        state: GameState,
+        policy_targets: Optional[dict[Coord, float]] = None,
+        outcome: float = 0.0,
+    ) -> GNNExperience:
+        legal_moves = get_legal_moves(state)
+        occupied = list(state.all_hexes)
+        node_coords = sorted(set(occupied) | set(legal_moves))
+        node_features = self._node_features(state, node_coords, legal_moves)
+        edge_index, edge_attr = self._edge_index_and_attr(node_coords)
+        is_legal = np.asarray([(coord in legal_moves) for coord in node_coords], dtype=bool)
+        mcts_probs = np.zeros(len(node_coords), dtype=np.float32)
+        if policy_targets:
+            for idx, coord in enumerate(node_coords):
+                if coord in policy_targets:
+                    mcts_probs[idx] = float(policy_targets[coord])
+        elif is_legal.any():
+            mcts_probs[is_legal] = 1.0 / float(is_legal.sum())
+        return GNNExperience(
+            node_features=node_features,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            node_coords=np.asarray(node_coords, dtype=np.int16),
+            is_legal=is_legal,
+            mcts_probs=mcts_probs,
+            outcome=float(outcome),
+            turn_number=state.turn_number,
+        )
+
+    def build_data(self, state: GameState):
+        if torch is None or Data is None:
+            raise RuntimeError("torch and torch_geometric are required for graph inference")
+        exp = self.build_experience(state)
+        return experience_to_data(exp)
+
+
+def experience_to_data(experience: GNNExperience):
+    if torch is None or Data is None:
+        raise RuntimeError("torch and torch_geometric are required for graph inference")
+    return Data(
+        x=torch.tensor(experience.node_features, dtype=torch.float32),
+        edge_index=torch.tensor(experience.edge_index, dtype=torch.long),
+        edge_attr=torch.tensor(experience.edge_attr, dtype=torch.float32),
+        legal_mask=torch.tensor(experience.is_legal, dtype=torch.bool),
+        policy_target=torch.tensor(experience.mcts_probs, dtype=torch.float32),
+        outcome=torch.tensor([experience.outcome], dtype=torch.float32),
+        node_coords=torch.tensor(experience.node_coords, dtype=torch.int16),
+    )
+
+
+def color_swap(experience: GNNExperience) -> GNNExperience:
+    swapped = np.array(experience.node_features, copy=True)
+    swapped[:, [2, 3]] = swapped[:, [3, 2]]
+    swapped[:, 6] = 1.0 - swapped[:, 6]
+    return GNNExperience(
+        node_features=swapped,
+        edge_index=np.array(experience.edge_index, copy=True),
+        edge_attr=np.array(experience.edge_attr, copy=True),
+        node_coords=np.array(experience.node_coords, copy=True),
+        is_legal=np.array(experience.is_legal, copy=True),
+        mcts_probs=np.array(experience.mcts_probs, copy=True),
+        outcome=-float(experience.outcome),
+        turn_number=experience.turn_number,
+    )
+
+
+def experiences_to_batch(experiences: Iterable[GNNExperience]):
+    if torch is None or Data is None:
+        raise RuntimeError("torch and torch_geometric are required for batching")
+    from torch_geometric.data import Batch
+
+    return Batch.from_data_list([experience_to_data(exp) for exp in experiences])

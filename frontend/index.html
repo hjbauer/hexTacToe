@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hex Self-Play Trainer</title>
+    <link rel="stylesheet" href="/frontend/style.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero" id="appHeader">
+        <div>
+          <p class="eyebrow">Local RL Workbench</p>
+          <h1>Hex Self-Play Training System</h1>
+        </div>
+        <div class="hero-metrics" id="heroMetrics">
+          <span id="headerTrainingState">Idle</span>
+          <span id="headerIteration">Iteration 0</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="startup-menu" id="startupMenu">
+          <div class="menu-card">
+            <p class="eyebrow">Choose A Mode</p>
+            <h2>What do you want to do?</h2>
+            <p class="menu-copy">
+              Start in a focused workspace instead of booting the full dashboard.
+            </p>
+            <div class="menu-actions">
+              <button class="mode-button mode-train" id="openTrainMode">Train</button>
+              <button class="mode-button mode-play" id="openPlayMode">Play</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace hidden" id="trainWorkspace">
+          <div class="workspace-bar">
+            <button class="back-button" id="backToMenuFromTrain">Menu</button>
+            <span>Training workspace</span>
+          </div>
+          <div class="single-column">
+            <section class="panel training-primary" id="trainingPanel">
+              <div class="panel-header">
+                <h2>Training</h2>
+                <div class="panel-actions">
+                  <button id="openStatsWindowBtn">Stats</button>
+                  <button id="openSpectateWindowBtn">Spectate</button>
+                </div>
+              </div>
+              <div class="control-row">
+                <button id="startTrainingBtn">Start</button>
+                <button id="stopTrainingBtn">Stop</button>
+                <button id="freshRunBtn">Start Fresh</button>
+                <button id="saveCheckpointBtn">Save Snapshot</button>
+              </div>
+              <div class="control-row">
+                <select id="checkpointSelect"></select>
+                <button id="refreshCheckpointBtn">Reload Snapshots</button>
+                <button id="loadCheckpointBtn">Load Snapshot</button>
+              </div>
+              <div class="progress-hero">
+                <div>
+                  <p class="progress-label" id="trainingPhaseLabel">Idle</p>
+                  <h3 id="trainingStatusMessage">Waiting to start</h3>
+                </div>
+                <div class="progress-badge" id="trainingBadge">Idle</div>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" id="trainingProgressFill"></div>
+              </div>
+              <div class="progress-caption" id="trainingProgressCaption">No active work</div>
+              <div class="summary-grid" id="trainingSummary"></div>
+              <div class="mini-table" id="trainingEventLog"></div>
+            </section>
+          </div>
+          <div class="overlay hidden" id="trainStatsOverlay">
+            <section class="panel floating-window">
+              <div class="panel-header">
+                <h2>Training Stats</h2>
+                <button id="closeStatsWindowBtn">Close</button>
+              </div>
+              <div class="stats-grid" id="trainingStats"></div>
+              <canvas id="lossChart" height="160"></canvas>
+              <div id="bufferDistribution" class="mini-table"></div>
+              <div class="stats-grid" id="evalStats"></div>
+              <div class="mini-table" id="leaderboardTable"></div>
+              <div class="mini-table" id="poolWinRates"></div>
+              <div class="mini-table" id="promotionHistory"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="workspace hidden" id="playWorkspace">
+          <div class="workspace-bar">
+            <button class="back-button" id="backToMenuFromPlay">Menu</button>
+            <span>Play workspace</span>
+          </div>
+          <div class="single-column">
+            <section class="panel" id="playPanel">
+              <div class="panel-header">
+                <h2>Play</h2>
+              </div>
+              <div class="control-row">
+                <select id="humanColorSelect">
+                  <option value="red">Play Red</option>
+                  <option value="blue">Play Blue</option>
+                  <option value="both">Play Both</option>
+                </select>
+                <select id="opponentModelSelect"></select>
+                <span id="opponentEloBadge">Opponent Elo: -</span>
+                <button id="newGameBtn">New Game</button>
+              </div>
+              <div class="spectate-meta">
+                <span id="humanGameStatus">No game running</span>
+                <span id="humanTurnStatus">Turn: -</span>
+              </div>
+              <canvas id="playCanvas" width="620" height="420"></canvas>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/frontend/js/hex_canvas.js"></script>
+    <script src="/frontend/js/ws_client.js"></script>
+    <script src="/frontend/js/training_panel.js"></script>
+    <script src="/frontend/js/spectate_panel.js"></script>
+    <script src="/frontend/js/human_game.js"></script>
+    <script src="/frontend/js/main.js"></script>
+  </body>
+</html>

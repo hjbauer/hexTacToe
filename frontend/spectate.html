@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hex Spectate</title>
+    <link rel="stylesheet" href="/frontend/style.css" />
+  </head>
+  <body class="spectate-page">
+    <div class="spectate-shell">
+      <header class="spectate-topbar">
+        <div>
+          <p class="eyebrow">Live Games</p>
+          <h1>Spectate</h1>
+        </div>
+        <div class="spectate-toolbar">
+          <a class="nav-chip" href="/?mode=train">Back To Train</a>
+          <span id="spectatePopulation">Population: 0</span>
+          <span id="spectateActiveCount">Active Games: 0</span>
+          <label class="spectate-select">
+            <span>Show</span>
+            <select id="spectateCountSelect">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8" selected>8</option>
+              <option value="12">12</option>
+              <option value="16">16</option>
+            </select>
+          </label>
+          <button id="spectateAnnotateToggleBtn">Annotate Off</button>
+          <button id="spectatePaintRedBtn">Paint Red</button>
+          <button id="spectatePaintBlueBtn">Paint Blue</button>
+          <button id="spectateClearMarksBtn">Clear Marks</button>
+          <button id="fitAllBoardsBtn">Fit All</button>
+        </div>
+      </header>
+      <main class="spectate-stage">
+        <div class="spectate-grid" id="spectateGrid"></div>
+      </main>
+    </div>
+
+    <script src="/frontend/js/hex_canvas.js"></script>
+    <script src="/frontend/js/ws_client.js"></script>
+    <script src="/frontend/js/spectate_window.js"></script>
+  </body>
+</html>

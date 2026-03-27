@@ -1,4 +1,8 @@
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
+  const authenticated = await ensureAuthenticated();
+  if (!authenticated) {
+    return;
+  }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const wsClient = new WSClient(`${protocol}://${window.location.host}/ws`);
   const params = new URLSearchParams(window.location.search);

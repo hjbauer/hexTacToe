@@ -86,6 +86,11 @@ if nn is not None and GATv2Conv is not None:
                 nn.Linear(64, 1),
                 nn.Tanh(),
             )
+            self.aux_head = nn.Sequential(
+                nn.Linear(config.hidden_dim * 2, 128),
+                nn.ELU(),
+                nn.Linear(128, 4),
+            )
 
         def forward(self, data):
             x = self.input_proj(data.x)
@@ -107,10 +112,14 @@ if nn is not None and GATv2Conv is not None:
                 dim=-1,
             )
             value = self.value_head(pooled).squeeze(-1)
-            return logits, value
+            aux = self.aux_head(pooled)
+            return logits, value, aux
 
         def policy_log_probs(self, data):
-            logits, _ = self.forward(data)
+            logits, _, _ = self.forward(data)
+            return self.logits_to_log_probs(logits, data)
+
+        def logits_to_log_probs(self, logits, data):
             batch = getattr(data, "batch", None)
             if batch is None:
                 batch = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)

@@ -65,7 +65,13 @@ class TrainingLoop:
             raise RuntimeError("torch is required for training")
         self.app_state = app_state
         self.config = config or TrainingConfig()
-        self.device = self.config.device
+        self.device = self._resolve_device(self.config.device)
+        if self.device.startswith("cuda") and torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:
+                pass
         self.reference_model = self._new_model()
         self.reference_elo = self.config.initial_elo
         self.replay_buffer = ReplayBuffer(
@@ -91,6 +97,13 @@ class TrainingLoop:
         self._assign_lineage_roles()
         self._sync_serving_member()
         self._set_reference_from_leader()
+
+    def _resolve_device(self, requested: str) -> str:
+        if requested == "auto":
+            return "cuda:0" if torch.cuda.is_available() else "cpu"
+        if requested.startswith("cuda") and not torch.cuda.is_available():
+            return "cpu"
+        return requested
 
     def _new_model(self) -> HexGNNModel:
         return HexGNNModel(self.config.model).to(self.device)

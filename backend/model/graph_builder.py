@@ -27,6 +27,7 @@ class GNNExperience:
     mcts_probs: np.ndarray
     outcome: float
     turn_number: int
+    aux_targets: Optional[np.ndarray] = None
 
 
 class GraphBuilder:
@@ -103,6 +104,7 @@ class GraphBuilder:
         state: GameState,
         policy_targets: Optional[dict[Coord, float]] = None,
         outcome: float = 0.0,
+        aux_targets: Optional[np.ndarray] = None,
     ) -> GNNExperience:
         legal_moves = get_legal_moves(state)
         occupied = list(state.all_hexes)
@@ -126,6 +128,11 @@ class GraphBuilder:
             mcts_probs=mcts_probs,
             outcome=float(outcome),
             turn_number=state.turn_number,
+            aux_targets=(
+                np.asarray(aux_targets, dtype=np.float32)
+                if aux_targets is not None
+                else np.zeros(4, dtype=np.float32)
+            ),
         )
 
     def build_data(self, state: GameState):
@@ -138,6 +145,7 @@ class GraphBuilder:
 def experience_to_data(experience: GNNExperience):
     if torch is None or Data is None:
         raise RuntimeError("torch and torch_geometric are required for graph inference")
+    aux_targets = getattr(experience, "aux_targets", None)
     return Data(
         x=torch.tensor(experience.node_features, dtype=torch.float32),
         edge_index=torch.tensor(experience.edge_index, dtype=torch.long),
@@ -145,6 +153,11 @@ def experience_to_data(experience: GNNExperience):
         legal_mask=torch.tensor(experience.is_legal, dtype=torch.bool),
         policy_target=torch.tensor(experience.mcts_probs, dtype=torch.float32),
         outcome=torch.tensor([experience.outcome], dtype=torch.float32),
+        aux_target=(
+            torch.tensor(aux_targets, dtype=torch.float32)
+            if aux_targets is not None
+            else torch.zeros(4, dtype=torch.float32)
+        ),
         node_coords=torch.tensor(experience.node_coords, dtype=torch.int16),
     )
 
@@ -153,6 +166,10 @@ def color_swap(experience: GNNExperience) -> GNNExperience:
     swapped = np.array(experience.node_features, copy=True)
     swapped[:, [2, 3]] = swapped[:, [3, 2]]
     swapped[:, 6] = 1.0 - swapped[:, 6]
+    swapped_aux = np.array(getattr(experience, "aux_targets", np.zeros(4, dtype=np.float32)), copy=True)
+    if swapped_aux.shape[0] >= 4:
+        swapped_aux[[0, 1]] = swapped_aux[[1, 0]]
+        swapped_aux[[2, 3]] = swapped_aux[[3, 2]]
     return GNNExperience(
         node_features=swapped,
         edge_index=np.array(experience.edge_index, copy=True),
@@ -162,6 +179,51 @@ def color_swap(experience: GNNExperience) -> GNNExperience:
         mcts_probs=np.array(experience.mcts_probs, copy=True),
         outcome=-float(experience.outcome),
         turn_number=experience.turn_number,
+        aux_targets=swapped_aux,
+    )
+
+
+def _rotate_axial(q: float, r: float, steps: int) -> tuple[float, float]:
+    steps = steps % 6
+    for _ in range(steps):
+        q, r = -r, q + r
+    return q, r
+
+
+def rotate_experience(experience: GNNExperience, steps: int) -> GNNExperience:
+    if steps % 6 == 0:
+        return GNNExperience(
+            node_features=np.array(experience.node_features, copy=True),
+            edge_index=np.array(experience.edge_index, copy=True),
+            edge_attr=np.array(experience.edge_attr, copy=True),
+            node_coords=np.array(experience.node_coords, copy=True),
+            is_legal=np.array(experience.is_legal, copy=True),
+            mcts_probs=np.array(experience.mcts_probs, copy=True),
+            outcome=float(experience.outcome),
+            turn_number=experience.turn_number,
+            aux_targets=np.array(getattr(experience, "aux_targets", np.zeros(4, dtype=np.float32)), copy=True),
+        )
+
+    rotated_features = np.array(experience.node_features, copy=True)
+    rotated_coords = np.array(experience.node_coords, copy=True)
+    for index, (q, r) in enumerate(experience.node_coords):
+        rq, rr = _rotate_axial(int(q), int(r), steps)
+        rotated_coords[index, 0] = int(rq)
+        rotated_coords[index, 1] = int(rr)
+    for index, (q_norm, r_norm) in enumerate(experience.node_features[:, :2]):
+        rq_norm, rr_norm = _rotate_axial(float(q_norm), float(r_norm), steps)
+        rotated_features[index, 0] = rq_norm
+        rotated_features[index, 1] = rr_norm
+    return GNNExperience(
+        node_features=rotated_features,
+        edge_index=np.array(experience.edge_index, copy=True),
+        edge_attr=np.array(experience.edge_attr, copy=True),
+        node_coords=rotated_coords,
+        is_legal=np.array(experience.is_legal, copy=True),
+        mcts_probs=np.array(experience.mcts_probs, copy=True),
+        outcome=float(experience.outcome),
+        turn_number=experience.turn_number,
+        aux_targets=np.array(getattr(experience, "aux_targets", np.zeros(4, dtype=np.float32)), copy=True),
     )
 
 

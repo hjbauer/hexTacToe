@@ -466,9 +466,10 @@ class SelfPlayWorker:
 def _build_model_agent(config: TrainingConfig, state_dict: dict) -> ModelAgent:
     if torch is None:
         raise RuntimeError("torch is required for process self-play")
-    model = HexGNNModel(config.model).to(config.device)
+    device = getattr(config, "self_play_device", "cpu")
+    model = HexGNNModel(config.model).to(device)
     model.load_state_dict(state_dict, strict=False)
-    return ModelAgent(model, config.device)
+    return ModelAgent(model, device)
 
 
 def _write_progress_snapshot(progress_path: str, snapshot: dict):

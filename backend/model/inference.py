@@ -49,7 +49,7 @@ class ModelAgent:
         data = data.to(self.device)
         self.model.eval()
         with torch.no_grad():
-            logits, _ = self.model(data)
+            logits, _, _ = self.model(data)
         legal_mask = data.legal_mask.detach().cpu().numpy()
         coords = data.node_coords.detach().cpu().numpy()
         legal_logits = logits.detach().cpu().numpy()[legal_mask]

@@ -324,6 +324,11 @@ class SpectateWindow {
   }
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
+  const authenticated = await ensureAuthenticated();
+  if (!authenticated) {
+    window.location.href = "/";
+    return;
+  }
   new SpectateWindow();
 });

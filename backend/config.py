@@ -48,18 +48,22 @@ class TrainingConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
-    device: str = "cpu"
+    device: str = "auto"
+    self_play_device: str = "cpu"
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0
     replay_buffer_capacity: int = 100_000
     replay_buffer_historical_fraction: float = 0.2
-    batch_size: int = 32
+    tactical_replay_fraction: float = 0.35
+    batch_size: int = 64
     self_play_games_per_iteration: int = 24
     parallel_self_play_workers: int = 8
     local_spectate_games_per_batch: int = 1
     self_play_worker_torch_threads: int = 1
+    parallel_gradient_workers: int = 1
     gradient_steps_per_iteration: int = 2
+    max_models_to_train_per_iteration: int = 4
     min_buffer_size_to_train: int = 32
     checkpoint_interval: int = 20
     keep_last_checkpoints: int = 1
@@ -102,6 +106,10 @@ class TrainingConfig:
     multi_front_growth_reward: float = 1.1
     multi_front_threat_bonus: float = 1.0
     hindsight_corrections_per_loss: int = 2
+    tactical_corrections_per_game: int = 4
+    auxiliary_loss_weight: float = 0.25
+    rotation_augmentation_samples: int = 1
+    use_mixed_precision: bool = True
     reward_normalization_scale: float = 10.0
     opening_random_moves: int = 4
     opening_random_move_probability: float = 0.35

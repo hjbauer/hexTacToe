@@ -14,6 +14,12 @@ class ReplayBuffer:
         self._historical: deque[GNNExperience] = deque(maxlen=historical_capacity)
         self._historical_sample_rate: float = 0.05
 
+    def _is_tactical(self, experience: GNNExperience) -> bool:
+        aux = getattr(experience, "aux_targets", None)
+        if aux is None or len(aux) < 4:
+            return False
+        return bool(aux[0] > 0.5 or aux[1] > 0.5 or aux[2] > 0.0 or aux[3] > 0.0)
+
     def add(self, experiences: list[GNNExperience]):
         for exp in experiences:
             self._recent.append(exp)
@@ -23,17 +29,24 @@ class ReplayBuffer:
     def sample(self, batch_size: int) -> list[GNNExperience]:
         if not len(self):
             return []
-        recent_target = batch_size - min(batch_size // 5, len(self._historical))
-        recent_sample = random.sample(list(self._recent), min(recent_target, len(self._recent)))
+        recent_items = list(self._recent)
+        historical_items = list(self._historical)
+        tactical_pool = [exp for exp in recent_items if self._is_tactical(exp)]
+        tactical_target = min(batch_size // 3, len(tactical_pool))
+        tactical_sample = random.sample(tactical_pool, tactical_target) if tactical_target else []
+
+        recent_target = batch_size - len(tactical_sample) - min(batch_size // 5, len(historical_items))
+        non_tactical_recent = [exp for exp in recent_items if exp not in tactical_sample]
+        recent_sample = random.sample(non_tactical_recent, min(recent_target, len(non_tactical_recent)))
         historical_target = min(batch_size - len(recent_sample), len(self._historical))
         historical_sample = (
-            random.sample(list(self._historical), historical_target)
+            random.sample(historical_items, historical_target)
             if historical_target
             else []
         )
-        combined = recent_sample + historical_sample
+        combined = tactical_sample + recent_sample + historical_sample
         if len(combined) < batch_size:
-            pool = list(self._recent) + list(self._historical)
+            pool = recent_items + historical_items
             needed = min(batch_size - len(combined), len(pool))
             combined.extend(random.sample(pool, needed))
         return combined

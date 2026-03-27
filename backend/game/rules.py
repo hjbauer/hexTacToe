@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 
 from backend.game.game_state import Coord, GameState
 from backend.game.hex_coord import legal_placement_zone
@@ -8,6 +9,7 @@ from backend.game.hex_coord import legal_placement_zone
 HEX_AXES = [(1, 0), (0, 1), (1, -1)]
 
 
+@lru_cache(maxsize=131072)
 def check_win(hexes: frozenset[Coord]) -> bool:
     hex_set = set(hexes)
     for q, r in hexes:
@@ -28,10 +30,11 @@ def check_win(hexes: frozenset[Coord]) -> bool:
     return False
 
 
-def get_legal_moves(state: GameState) -> set[Coord]:
+@lru_cache(maxsize=131072)
+def get_legal_moves(state: GameState) -> frozenset[Coord]:
     if state.is_terminal:
-        return set()
-    return legal_placement_zone(state.all_hexes, is_first_move=not state.all_hexes)
+        return frozenset()
+    return frozenset(legal_placement_zone(state.all_hexes, is_first_move=not state.all_hexes))
 
 
 def apply_move(state: GameState, coord: Coord) -> GameState:

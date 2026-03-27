@@ -9,7 +9,7 @@ from backend.game.game_state import GameState
 from backend.game.rules import apply_moves
 from backend.model.inference import ModelAgent
 from backend.state.app_state import HumanGameSession
-from backend.training.baselines import HeuristicBaseline
+from backend.training.baselines import HeuristicBaseline, forced_move_policy
 from backend.training.trainer import TrainingLoop
 
 router = APIRouter(prefix="/api/game", tags=["game"])
@@ -31,11 +31,13 @@ def _select_ai_move(app_state, state: GameState, opponent_model_name: str):
     try:
         _, _, agent = trainer.get_opponent_descriptor(opponent_model_name)
         if isinstance(agent, ModelAgent):
+            forced = forced_move_policy(state) if trainer.config.use_tactical_selector else None
             return agent.select_move(
                 state,
                 temperature=0.1,
                 greedy=True,
                 allow_tactical_override=True,
+                forced=forced,
             ).coord
         return agent.select_move(state)
     except Exception:

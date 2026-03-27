@@ -8,7 +8,7 @@ from backend.game.game_state import GameState
 from backend.game.rules import apply_move
 from backend.model.inference import ModelAgent
 from backend.state.app_state import EvalMetrics
-from backend.training.baselines import RandomBaseline
+from backend.training.baselines import RandomBaseline, forced_move_policy
 from backend.training.opponent_pool import OpponentPool
 
 
@@ -124,11 +124,13 @@ class EvaluationManager:
         while not state.is_terminal and move_count < turn_limit:
             current_agent = candidate_agent if state.current_player == candidate_color else opponent_agent
             if isinstance(current_agent, ModelAgent):
+                forced = forced_move_policy(state) if self.training_config.use_tactical_selector else None
                 coord = current_agent.select_move(
                     state,
                     temperature=0.1,
                     greedy=True,
                     allow_tactical_override=True,
+                    forced=forced,
                 ).coord
             else:
                 coord = current_agent.select_move(state)

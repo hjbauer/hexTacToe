@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Iterable, Optional
 
 import numpy as np
@@ -33,6 +34,20 @@ class GNNExperience:
 class GraphBuilder:
     def __init__(self, max_distance_norm: float = 8.0):
         self.max_distance_norm = max_distance_norm
+
+    @staticmethod
+    @lru_cache(maxsize=18)
+    def _edge_offsets() -> tuple[tuple[int, int, float], ...]:
+        offsets: list[tuple[int, int, float]] = []
+        for dq in range(-2, 3):
+            for dr in range(-2, 3):
+                if dq == 0 and dr == 0:
+                    continue
+                distance = hex_distance(0, 0, dq, dr)
+                if distance <= 2:
+                    offsets.append((dq, dr, distance / 2.0))
+        offsets.sort()
+        return tuple(offsets)
 
     def _node_features(
         self,
@@ -79,16 +94,16 @@ class GraphBuilder:
         return np.asarray(features, dtype=np.float32)
 
     def _edge_index_and_attr(self, node_coords: list[Coord]) -> tuple[np.ndarray, np.ndarray]:
+        coord_to_index = {coord: index for index, coord in enumerate(node_coords)}
         edges: list[list[int]] = []
         edge_attr: list[list[float]] = []
         for src, (sq, sr) in enumerate(node_coords):
-            for dst, (dq, dr) in enumerate(node_coords):
-                if src == dst:
+            for dq, dr, distance_norm in self._edge_offsets():
+                dst = coord_to_index.get((sq + dq, sr + dr))
+                if dst is None:
                     continue
-                distance = hex_distance(sq, sr, dq, dr)
-                if distance <= 2:
-                    edges.append([src, dst])
-                    edge_attr.append([distance / 2.0])
+                edges.append([src, dst])
+                edge_attr.append([distance_norm])
         if not edges:
             return (
                 np.zeros((2, 0), dtype=np.int64),
@@ -99,6 +114,33 @@ class GraphBuilder:
             np.asarray(edge_attr, dtype=np.float32),
         )
 
+    @staticmethod
+    @lru_cache(maxsize=131072)
+    def _template_for_state(
+        state: GameState,
+        max_distance_norm: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        builder = GraphBuilder(max_distance_norm=max_distance_norm)
+        legal_moves = get_legal_moves(state)
+        occupied = list(state.all_hexes)
+        node_coords = sorted(set(occupied) | set(legal_moves))
+        node_features = builder._node_features(state, node_coords, set(legal_moves))
+        edge_index, edge_attr = builder._edge_index_and_attr(node_coords)
+        is_legal = np.asarray([(coord in legal_moves) for coord in node_coords], dtype=bool)
+        node_features.setflags(write=False)
+        edge_index.setflags(write=False)
+        edge_attr.setflags(write=False)
+        is_legal.setflags(write=False)
+        node_coords_array = np.asarray(node_coords, dtype=np.int16)
+        node_coords_array.setflags(write=False)
+        return (
+            node_features,
+            edge_index,
+            edge_attr,
+            node_coords_array,
+            is_legal,
+        )
+
     def build_experience(
         self,
         state: GameState,
@@ -106,17 +148,16 @@ class GraphBuilder:
         outcome: float = 0.0,
         aux_targets: Optional[np.ndarray] = None,
     ) -> GNNExperience:
-        legal_moves = get_legal_moves(state)
-        occupied = list(state.all_hexes)
-        node_coords = sorted(set(occupied) | set(legal_moves))
-        node_features = self._node_features(state, node_coords, legal_moves)
-        edge_index, edge_attr = self._edge_index_and_attr(node_coords)
-        is_legal = np.asarray([(coord in legal_moves) for coord in node_coords], dtype=bool)
+        node_features, edge_index, edge_attr, node_coords, is_legal = self._template_for_state(
+            state,
+            self.max_distance_norm,
+        )
         mcts_probs = np.zeros(len(node_coords), dtype=np.float32)
         if policy_targets:
             for idx, coord in enumerate(node_coords):
-                if coord in policy_targets:
-                    mcts_probs[idx] = float(policy_targets[coord])
+                coord_key = (int(coord[0]), int(coord[1]))
+                if coord_key in policy_targets:
+                    mcts_probs[idx] = float(policy_targets[coord_key])
         elif is_legal.any():
             mcts_probs[is_legal] = 1.0 / float(is_legal.sum())
         return GNNExperience(

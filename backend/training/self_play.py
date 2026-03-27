@@ -202,6 +202,7 @@ class SelfPlayWorker:
                         prior_policy=heuristic_policy(state) if heuristic_weight > 0.0 else None,
                         prior_weight=heuristic_weight,
                         allow_tactical_override=self.config.use_tactical_selector,
+                        forced=forced,
                     )
                     if (
                         state.current_player == candidate_color

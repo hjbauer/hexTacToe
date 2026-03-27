@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import random
 
 from backend.game.game_state import Coord, GameState
@@ -87,7 +88,12 @@ def _threat_segments(state: GameState, player: str) -> list[tuple[Coord, ...]]:
     return segments
 
 
-def _threat_plans(state: GameState, player: str, max_empty: int = 2) -> list[tuple[Coord, ...]]:
+@lru_cache(maxsize=131072)
+def _threat_plans_cached(
+    state: GameState,
+    player: str,
+    max_empty: int = 2,
+) -> tuple[tuple[Coord, ...], ...]:
     owned = _occupied_by_player(state, player)
     opponent = "blue" if player == "red" else "red"
     blocked = _occupied_by_player(state, opponent)
@@ -106,7 +112,11 @@ def _threat_plans(state: GameState, player: str, max_empty: int = 2) -> list[tup
             continue
         plans.add(tuple(sorted(empties)))
 
-    return sorted(plans)
+    return tuple(sorted(plans))
+
+
+def _threat_plans(state: GameState, player: str, max_empty: int = 2) -> tuple[tuple[Coord, ...], ...]:
+    return _threat_plans_cached(state, player, max_empty)
 
 
 def immediate_winning_moves(state: GameState, player: str) -> list[Coord]:
@@ -114,7 +124,7 @@ def immediate_winning_moves(state: GameState, player: str) -> list[Coord]:
 
 
 def next_turn_winning_plans(state: GameState, player: str) -> list[tuple[Coord, ...]]:
-    return _threat_plans(state, player, max_empty=2)
+    return list(_threat_plans(state, player, max_empty=2))
 
 
 def winning_moves_this_turn(state: GameState, player: str) -> dict[Coord, float]:
@@ -235,7 +245,10 @@ def blocking_moves_for_next_turn(state: GameState, opponent: str) -> dict[Coord,
     return {move: value for move, value in normalized.items() if value > 1e-9}
 
 
-def forced_move_policy(state: GameState) -> TacticalSelectorResult | None:
+@lru_cache(maxsize=131072)
+def _forced_move_policy_cached(
+    state: GameState,
+) -> tuple[Coord, tuple[tuple[Coord, float], ...], str, tuple[Coord, ...]] | None:
     legal_moves = sorted(get_legal_moves(state))
     if not legal_moves:
         return None
@@ -248,31 +261,45 @@ def forced_move_policy(state: GameState) -> TacticalSelectorResult | None:
     if winning_policy:
         winning_moves = tuple(sorted(move for move, prob in winning_policy.items() if prob > 0.0))
         chosen = max(winning_policy.items(), key=lambda item: (item[1], scores.get(item[0], 0.0), item[0]))[0]
-        return TacticalSelectorResult(
-            coord=chosen,
-            policy=winning_policy,
-            reason="win_now" if any(len(plan) == 1 for plan in next_turn_winning_plans(state, player)) else "win_this_turn",
-            forced_moves=winning_moves,
+        return (
+            chosen,
+            tuple(sorted(winning_policy.items())),
+            "win_now" if any(len(plan) == 1 for plan in next_turn_winning_plans(state, player)) else "win_this_turn",
+            winning_moves,
         )
 
     blocking_policy = blocking_moves_for_next_turn(state, opponent)
     if blocking_policy:
         blocking_moves = tuple(sorted(move for move, prob in blocking_policy.items() if prob > 0.0))
         chosen = max(blocking_policy.items(), key=lambda item: (item[1], scores.get(item[0], 0.0), item[0]))[0]
-        return TacticalSelectorResult(
-            coord=chosen,
-            policy=blocking_policy,
-            reason="block_now" if any(len(plan) == 1 for plan in next_turn_winning_plans(state, opponent)) else "block_next_turn",
-            forced_moves=blocking_moves,
+        return (
+            chosen,
+            tuple(sorted(blocking_policy.items())),
+            "block_now" if any(len(plan) == 1 for plan in next_turn_winning_plans(state, opponent)) else "block_next_turn",
+            blocking_moves,
         )
 
     return None
 
 
-def score_legal_moves(state: GameState) -> dict[Coord, float]:
+def forced_move_policy(state: GameState) -> TacticalSelectorResult | None:
+    cached = _forced_move_policy_cached(state)
+    if cached is None:
+        return None
+    coord, policy_items, reason, forced_moves = cached
+    return TacticalSelectorResult(
+        coord=coord,
+        policy=dict(policy_items),
+        reason=reason,
+        forced_moves=forced_moves,
+    )
+
+
+@lru_cache(maxsize=131072)
+def _score_legal_moves_cached(state: GameState) -> tuple[tuple[Coord, float], ...]:
     legal_moves = list(get_legal_moves(state))
     if not legal_moves:
-        return {}
+        return ()
 
     player = state.current_player
     opponent = "blue" if player == "red" else "red"
@@ -307,17 +334,26 @@ def score_legal_moves(state: GameState) -> dict[Coord, float]:
 
         scored[move] = score
 
-    return scored
+    return tuple(sorted(scored.items()))
 
 
-def heuristic_policy(state: GameState) -> dict[Coord, float]:
-    scores = score_legal_moves(state)
+def score_legal_moves(state: GameState) -> dict[Coord, float]:
+    return dict(_score_legal_moves_cached(state))
+
+
+@lru_cache(maxsize=131072)
+def _heuristic_policy_cached(state: GameState) -> tuple[tuple[Coord, float], ...]:
+    scores = dict(_score_legal_moves_cached(state))
     if not scores:
-        return {}
+        return ()
     max_score = max(scores.values())
     exp_scores = {move: pow(2.718281828, (score - max_score) / 12.0) for move, score in scores.items()}
     total = sum(exp_scores.values()) or 1.0
-    return {move: value / total for move, value in exp_scores.items()}
+    return tuple(sorted((move, value / total) for move, value in exp_scores.items()))
+
+
+def heuristic_policy(state: GameState) -> dict[Coord, float]:
+    return dict(_heuristic_policy_cached(state))
 
 
 class RandomBaseline:

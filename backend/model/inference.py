@@ -7,7 +7,7 @@ import numpy as np
 
 from backend.game.game_state import Coord, GameState
 from backend.model.graph_builder import GraphBuilder
-from backend.training.baselines import forced_move_policy
+from backend.training.baselines import TacticalSelectorResult, forced_move_policy
 
 try:
     import torch
@@ -42,6 +42,7 @@ class ModelAgent:
         prior_policy: Optional[dict[Coord, float]] = None,
         prior_weight: float = 0.0,
         allow_tactical_override: bool = False,
+        forced: Optional[TacticalSelectorResult] = None,
     ) -> InferenceResult:
         if torch is None:
             raise RuntimeError("torch is required for inference")
@@ -72,7 +73,7 @@ class ModelAgent:
         move_idx = int(np.argmax(probs)) if greedy else int(np.random.choice(len(legal_coords), p=probs))
         raw_coord = legal_coords[move_idx]
         entropy = float(-(probs * np.log(np.clip(probs, 1e-9, 1.0))).sum())
-        forced = forced_move_policy(state) if allow_tactical_override else None
+        forced = forced if forced is not None else (forced_move_policy(state) if allow_tactical_override else None)
         selected_coord = raw_coord
         was_overridden = False
         override_reason = None

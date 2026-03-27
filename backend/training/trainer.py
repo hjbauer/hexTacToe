@@ -28,6 +28,7 @@ from backend.model.network import HexGNNModel
 from backend.state.app_state import AppState, EvalMetrics
 from backend.training.baselines import HeuristicBaseline, RandomBaseline
 from backend.training.checkpoint import (
+    latest_resumable_checkpoint,
     list_checkpoints,
     load_checkpoint,
     mark_reference,
@@ -110,6 +111,7 @@ class TrainingLoop:
         self._assign_lineage_roles()
         self._sync_serving_member()
         self._set_reference_from_leader()
+        self._maybe_auto_resume()
 
     def _resolve_device(self, requested: str) -> str:
         if requested == "auto":
@@ -260,6 +262,22 @@ class TrainingLoop:
         leader = self._leader_member()
         self.reference_model.load_state_dict(leader.model.state_dict())
         self.reference_elo = leader.elo
+
+    def _maybe_auto_resume(self):
+        if not self.config.auto_resume_from_latest_checkpoint:
+            return
+        checkpoints = list_checkpoints()
+        latest = latest_resumable_checkpoint(
+            bucket=self.config.checkpoint_s3_bucket,
+            prefix=self.config.checkpoint_s3_prefix,
+        )
+        if latest is None:
+            return
+        try:
+            self.load_checkpoint(latest)
+            self._record_event(f"Auto-resumed from {Path(latest).name}")
+        except Exception as exc:
+            self._record_event(f"Auto-resume failed: {type(exc).__name__}")
 
     def leaderboard(self) -> list[dict[str, Any]]:
         ranked = sorted(
@@ -1103,7 +1121,13 @@ class TrainingLoop:
 
     def save_checkpoint(self, is_reference: bool = False) -> str:
         payload = self.checkpoint_payload(is_reference)
-        path = save_checkpoint(payload, keep_last=self.config.keep_last_checkpoints)
+        path = save_checkpoint(
+            payload,
+            keep_last=self.config.keep_last_checkpoints,
+            s3_bucket=self.config.checkpoint_s3_bucket,
+            s3_prefix=self.config.checkpoint_s3_prefix,
+            s3_keep_last=self.config.checkpoint_s3_keep_last,
+        )
         if is_reference:
             mark_reference(path)
         self.app_state.training_status.latest_checkpoint_path = path

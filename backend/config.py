@@ -65,8 +65,12 @@ class TrainingConfig:
     gradient_steps_per_iteration: int = 2
     max_models_to_train_per_iteration: int = 4
     min_buffer_size_to_train: int = 32
-    checkpoint_interval: int = 20
+    checkpoint_interval: int = 10
     keep_last_checkpoints: int = 1
+    auto_resume_from_latest_checkpoint: bool = True
+    checkpoint_s3_bucket: str = "hex-tactoe-checkpoints-hjbauer"
+    checkpoint_s3_prefix: str = "checkpoints"
+    checkpoint_s3_keep_last: int = 2
     checkpoint_recent_samples: int = 1024
     checkpoint_historical_samples: int = 256
     checkpoint_member_recent_samples: int = 256

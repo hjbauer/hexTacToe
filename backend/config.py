@@ -49,21 +49,21 @@ class TrainingConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     device: str = "auto"
-    self_play_device: str = "auto"
+    self_play_device: str = "cpu"
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0
     replay_buffer_capacity: int = 100_000
     replay_buffer_historical_fraction: float = 0.2
     tactical_replay_fraction: float = 0.35
-    batch_size: int = 64
+    batch_size: int = 128
     self_play_games_per_iteration: int = 24
     parallel_self_play_workers: int = 8
     local_spectate_games_per_batch: int = 1
     self_play_worker_torch_threads: int = 1
     parallel_gradient_workers: int = 1
     gradient_steps_per_iteration: int = 2
-    max_models_to_train_per_iteration: int = 4
+    max_models_to_train_per_iteration: int = 3
     min_buffer_size_to_train: int = 32
     checkpoint_interval: int = 10
     keep_last_checkpoints: int = 1

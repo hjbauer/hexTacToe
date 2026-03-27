@@ -74,6 +74,11 @@ class TrainingLoop:
             and torch.cuda.is_available()
             and self.config.use_mixed_precision
         )
+        self._autocast_dtype = (
+            torch.bfloat16
+            if self._use_mixed_precision and self.device.startswith("cuda")
+            else None
+        )
         self._grad_scaler = (
             torch.cuda.amp.GradScaler(enabled=True)
             if self._use_mixed_precision
@@ -877,11 +882,16 @@ class TrainingLoop:
             batch = member.replay_buffer.sample(self.config.batch_size)
             if not batch:
                 return None
-            pyg_batch = experiences_to_batch(batch).to(self.device)
+            pyg_batch = experiences_to_batch(batch)
+            if self.device.startswith("cuda"):
+                pyg_batch = pyg_batch.pin_memory()
+                pyg_batch = pyg_batch.to(self.device, non_blocking=True)
+            else:
+                pyg_batch = pyg_batch.to(self.device)
             member.model.train()
             member.optimizer.zero_grad(set_to_none=True)
             autocast_context = (
-                torch.autocast(device_type="cuda", dtype=torch.float16)
+                torch.autocast(device_type="cuda", dtype=self._autocast_dtype or torch.float16)
                 if self._use_mixed_precision
                 else nullcontext()
             )

@@ -31,7 +31,12 @@ def _select_ai_move(app_state, state: GameState, opponent_model_name: str):
     try:
         _, _, agent = trainer.get_opponent_descriptor(opponent_model_name)
         if isinstance(agent, ModelAgent):
-            return agent.select_move(state, temperature=0.1, greedy=True).coord
+            return agent.select_move(
+                state,
+                temperature=0.1,
+                greedy=True,
+                allow_tactical_override=True,
+            ).coord
         return agent.select_move(state)
     except Exception:
         return HeuristicBaseline().select_move(state)

@@ -7,12 +7,14 @@ import random
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+import numpy as np
+
 from backend.config import TrainingConfig
 from backend.game.game_state import GameState
 from backend.game.hex_coord import hex_distance
 from backend.game.rules import apply_move
 from backend.game.rules import get_legal_moves
-from backend.model.graph_builder import GNNExperience, GraphBuilder, color_swap
+from backend.model.graph_builder import GNNExperience, GraphBuilder, color_swap, rotate_experience
 from backend.model.inference import ModelAgent
 from backend.model.network import HexGNNModel
 from backend.training.baselines import (
@@ -69,11 +71,16 @@ class CandidateTurnRecord:
     immediate_reward: float
 
 
-def augment_experiences(experiences: list[GNNExperience]) -> list[GNNExperience]:
+def augment_experiences(
+    experiences: list[GNNExperience],
+    rotation_samples: int = 0,
+) -> list[GNNExperience]:
     augmented: list[GNNExperience] = []
     for exp in experiences:
         augmented.append(exp)
         augmented.append(color_swap(exp))
+        for _ in range(max(rotation_samples, 0)):
+            augmented.append(rotate_experience(exp, random.randint(1, 5)))
     return augmented
 
 
@@ -219,6 +226,7 @@ class SelfPlayWorker:
                             previous_state,
                             policy_targets=policy_for_record,
                             outcome=0.0,
+                            aux_targets=self._aux_targets(previous_state),
                         ),
                         immediate_reward=immediate_reward,
                     )
@@ -265,12 +273,14 @@ class SelfPlayWorker:
                     mcts_probs=experience.mcts_probs,
                     outcome=outcome,
                     turn_number=experience.turn_number,
+                    aux_targets=experience.aux_targets,
                 )
             )
         finalized.reverse()
         finalized.extend(self._loss_hindsight_experiences(recorded, winner, candidate_color))
+        finalized.extend(self._tactical_correction_experiences(recorded))
         return SelfPlayResult(
-            experiences=augment_experiences(finalized),
+            experiences=augment_experiences(finalized, self.config.rotation_augmentation_samples),
             winner=winner,
             candidate_color=candidate_color,
             move_count=move_count,
@@ -314,6 +324,21 @@ class SelfPlayWorker:
         next_turn = sum(1 for plan in plans if len(plan) == 2)
         return immediate, next_turn
 
+    def _aux_targets(self, state: GameState) -> np.ndarray:
+        player = state.current_player
+        opponent = "blue" if player == "red" else "red"
+        player_immediate, player_next_turn = self._tactical_counts(state, player)
+        opponent_immediate, opponent_next_turn = self._tactical_counts(state, opponent)
+        return np.asarray(
+            [
+                1.0 if player_immediate > 0 else 0.0,
+                1.0 if opponent_immediate > 0 else 0.0,
+                min(player_next_turn / 3.0, 1.0),
+                min(opponent_next_turn / 3.0, 1.0),
+            ],
+            dtype=np.float32,
+        )
+
     def _component_sizes(self, state: GameState, player: str) -> list[int]:
         return sorted((len(component) for component in connected_components(state, player)), reverse=True)
 
@@ -355,9 +380,37 @@ class SelfPlayWorker:
                     record.state,
                     policy_targets=correction.policy,
                     outcome=correction_outcome,
+                    aux_targets=self._aux_targets(record.state),
                 )
             )
             if len(hindsight) >= self.config.hindsight_corrections_per_loss:
+                break
+        hindsight.reverse()
+        return hindsight
+
+    def _tactical_correction_experiences(
+        self,
+        recorded: list[CandidateTurnRecord],
+    ) -> list[GNNExperience]:
+        hindsight: list[GNNExperience] = []
+        seen_turns: set[int] = set()
+        correction_outcome = self._normalize_return(-self.config.forced_override_penalty)
+        for record in reversed(recorded):
+            correction = forced_move_policy(record.state)
+            if correction is None or record.move in correction.forced_moves:
+                continue
+            if record.state.turn_number in seen_turns:
+                continue
+            seen_turns.add(record.state.turn_number)
+            hindsight.append(
+                self.graph_builder.build_experience(
+                    record.state,
+                    policy_targets=correction.policy,
+                    outcome=correction_outcome,
+                    aux_targets=self._aux_targets(record.state),
+                )
+            )
+            if len(hindsight) >= self.config.tactical_corrections_per_game:
                 break
         hindsight.reverse()
         return hindsight

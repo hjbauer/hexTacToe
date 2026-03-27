@@ -117,7 +117,12 @@ class EvaluationManager:
         while not state.is_terminal and move_count < self.training_config.max_turns_per_game:
             current_agent = candidate_agent if state.current_player == candidate_color else opponent_agent
             if isinstance(current_agent, ModelAgent):
-                coord = current_agent.select_move(state, temperature=0.1, greedy=True).coord
+                coord = current_agent.select_move(
+                    state,
+                    temperature=0.1,
+                    greedy=True,
+                    allow_tactical_override=True,
+                ).coord
             else:
                 coord = current_agent.select_move(state)
             state = apply_move(state, coord)

@@ -9,6 +9,7 @@ import random
 import shutil
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -66,6 +67,16 @@ class TrainingLoop:
         self.app_state = app_state
         self.config = config or TrainingConfig()
         self.device = self._resolve_device(self.config.device)
+        self._use_mixed_precision = (
+            self.device.startswith("cuda")
+            and torch.cuda.is_available()
+            and self.config.use_mixed_precision
+        )
+        self._grad_scaler = (
+            torch.cuda.amp.GradScaler(enabled=True)
+            if self._use_mixed_precision
+            else None
+        )
         if self.device.startswith("cuda") and torch.cuda.is_available():
             torch.backends.cudnn.benchmark = True
             try:
@@ -77,6 +88,7 @@ class TrainingLoop:
         self.replay_buffer = ReplayBuffer(
             capacity=self.config.replay_buffer_capacity,
             historical_fraction=self.config.replay_buffer_historical_fraction,
+            tactical_fraction=self.config.tactical_replay_fraction,
         )
         self.population = self._create_population()
         self.model = self.population[0].model
@@ -94,6 +106,7 @@ class TrainingLoop:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._self_play_executor: Optional[ProcessPoolExecutor] = None
         self._self_play_executor_workers: int = 0
+        self._role_priority = {"champion": 0, "contender": 1, "offspring": 2, "seed": 3}
         self._assign_lineage_roles()
         self._sync_serving_member()
         self._set_reference_from_leader()
@@ -131,6 +144,7 @@ class TrainingLoop:
             replay_buffer=ReplayBuffer(
                 capacity=self.config.replay_buffer_capacity,
                 historical_fraction=self.config.replay_buffer_historical_fraction,
+                tactical_fraction=self.config.tactical_replay_fraction,
             ),
             elo=self.config.initial_elo,
             peak_elo=self.config.initial_elo,
@@ -716,6 +730,15 @@ class TrainingLoop:
         trainable = [member for member in self.population if len(member.replay_buffer) >= self.config.min_buffer_size_to_train]
         if not trainable:
             return
+        trainable = sorted(
+            trainable,
+            key=lambda member: (
+                self._role_priority.get(member.role, 99),
+                -member.elo,
+                -member.peak_elo,
+                member.name,
+            ),
+        )[: max(1, self.config.max_models_to_train_per_iteration)]
 
         self._set_phase(
             "training",
@@ -725,16 +748,13 @@ class TrainingLoop:
         )
         await self._broadcast_training_status()
 
-        tasks = [
-            asyncio.create_task(asyncio.to_thread(self._train_member_epoch, member))
-            for member in trainable
-        ]
         completed = 0
         policy_losses: list[float] = []
         value_losses: list[float] = []
+        aux_losses: list[float] = []
 
-        for task in asyncio.as_completed(tasks):
-            result = await task
+        for member in trainable:
+            result = await asyncio.to_thread(self._train_member_epoch, member)
             if result is None:
                 continue
             completed += 1
@@ -742,9 +762,13 @@ class TrainingLoop:
                 policy_losses.append(result["policy_loss"])
             if result["value_loss"] is not None:
                 value_losses.append(result["value_loss"])
+            if result["aux_loss"] is not None:
+                aux_losses.append(result["aux_loss"])
             self.app_state.training_status.phase_progress = completed
             self.app_state.training_status.phase_total = len(trainable)
-            self.app_state.training_status.status_message = f"Updated {completed}/{len(trainable)} models"
+            self.app_state.training_status.status_message = (
+                f"Updated {completed}/{len(trainable)} models ({member.name})"
+            )
             await self._broadcast_training_status()
 
         avg_policy = sum(policy_losses) / len(policy_losses) if policy_losses else 0.0
@@ -763,6 +787,7 @@ class TrainingLoop:
     def _train_member_epoch(self, member: PopulationMember) -> dict[str, float | None] | None:
         last_policy_loss: Optional[float] = None
         last_value_loss: Optional[float] = None
+        last_aux_loss: Optional[float] = None
         for _ in range(self.config.gradient_steps_per_iteration):
             if self._stop_event.is_set():
                 return None
@@ -771,27 +796,44 @@ class TrainingLoop:
                 return None
             pyg_batch = experiences_to_batch(batch).to(self.device)
             member.model.train()
-            member.optimizer.zero_grad()
-            _, values = member.model(pyg_batch)
-            log_probs = member.model.policy_log_probs(pyg_batch)
-
-            legal_mask = pyg_batch.legal_mask
-            policy_targets = pyg_batch.policy_target[legal_mask]
-            policy_loss = -(policy_targets * log_probs[legal_mask]).sum() / max(
-                int(getattr(pyg_batch, "num_graphs", 1)),
-                1,
+            member.optimizer.zero_grad(set_to_none=True)
+            autocast_context = (
+                torch.autocast(device_type="cuda", dtype=torch.float16)
+                if self._use_mixed_precision
+                else nullcontext()
             )
-            value_targets = pyg_batch.outcome.view(-1)
-            value_loss = F.mse_loss(values, value_targets)
+            with autocast_context:
+                logits, values, aux_logits = member.model(pyg_batch)
+                log_probs = member.model.logits_to_log_probs(logits, pyg_batch)
+
+                legal_mask = pyg_batch.legal_mask
+                policy_targets = pyg_batch.policy_target[legal_mask]
+                policy_loss = -(policy_targets * log_probs[legal_mask]).sum() / max(
+                    int(getattr(pyg_batch, "num_graphs", 1)),
+                    1,
+                )
+                value_targets = pyg_batch.outcome.view(-1)
+                value_loss = F.mse_loss(values, value_targets)
+                aux_targets = pyg_batch.aux_target.view(-1, 4)
+                aux_loss = F.binary_cross_entropy_with_logits(aux_logits, aux_targets)
+                total_loss = policy_loss + value_loss + (self.config.auxiliary_loss_weight * aux_loss)
             if not math.isfinite(float(policy_loss.item())) or not math.isfinite(float(value_loss.item())):
                 self._record_event(f"Skipped non-finite gradient step for {member.name}")
                 continue
-            (policy_loss + value_loss).backward()
-            torch.nn.utils.clip_grad_norm_(member.model.parameters(), self.config.gradient_clip_norm)
-            member.optimizer.step()
+            if self._grad_scaler is not None:
+                self._grad_scaler.scale(total_loss).backward()
+                self._grad_scaler.unscale_(member.optimizer)
+                torch.nn.utils.clip_grad_norm_(member.model.parameters(), self.config.gradient_clip_norm)
+                self._grad_scaler.step(member.optimizer)
+                self._grad_scaler.update()
+            else:
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(member.model.parameters(), self.config.gradient_clip_norm)
+                member.optimizer.step()
             last_policy_loss = float(policy_loss.item())
             last_value_loss = float(value_loss.item())
-        return {"policy_loss": last_policy_loss, "value_loss": last_value_loss}
+            last_aux_loss = float(aux_loss.item())
+        return {"policy_loss": last_policy_loss, "value_loss": last_value_loss, "aux_loss": last_aux_loss}
 
     async def _run_evaluation(self):
         leader = self._leader_member()
@@ -1062,6 +1104,7 @@ class TrainingLoop:
             buffer = ReplayBuffer(
                 capacity=self.config.replay_buffer_capacity,
                 historical_fraction=self.config.replay_buffer_historical_fraction,
+                tactical_fraction=self.config.tactical_replay_fraction,
             )
             buffer.load(item.get("replay_buffer") or [])
             self.population.append(

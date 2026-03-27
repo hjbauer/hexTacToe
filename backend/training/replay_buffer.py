@@ -7,12 +7,18 @@ from backend.model.graph_builder import GNNExperience
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int = 100_000, historical_fraction: float = 0.2):
+    def __init__(
+        self,
+        capacity: int = 100_000,
+        historical_fraction: float = 0.2,
+        tactical_fraction: float = 0.35,
+    ):
         recent_capacity = int(capacity * (1.0 - historical_fraction))
         historical_capacity = max(capacity - recent_capacity, 1)
         self._recent: deque[GNNExperience] = deque(maxlen=max(recent_capacity, 1))
         self._historical: deque[GNNExperience] = deque(maxlen=historical_capacity)
         self._historical_sample_rate: float = 0.05
+        self._tactical_fraction = min(max(tactical_fraction, 0.0), 0.9)
 
     def _is_tactical(self, experience: GNNExperience) -> bool:
         aux = getattr(experience, "aux_targets", None)
@@ -32,11 +38,12 @@ class ReplayBuffer:
         recent_items = list(self._recent)
         historical_items = list(self._historical)
         tactical_pool = [exp for exp in recent_items if self._is_tactical(exp)]
-        tactical_target = min(batch_size // 3, len(tactical_pool))
+        tactical_target = min(int(batch_size * self._tactical_fraction), len(tactical_pool))
         tactical_sample = random.sample(tactical_pool, tactical_target) if tactical_target else []
 
         recent_target = batch_size - len(tactical_sample) - min(batch_size // 5, len(historical_items))
-        non_tactical_recent = [exp for exp in recent_items if exp not in tactical_sample]
+        tactical_ids = {id(exp) for exp in tactical_sample}
+        non_tactical_recent = [exp for exp in recent_items if id(exp) not in tactical_ids]
         recent_sample = random.sample(non_tactical_recent, min(recent_target, len(non_tactical_recent)))
         historical_target = min(batch_size - len(recent_sample), len(self._historical))
         historical_sample = (

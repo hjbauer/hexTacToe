@@ -142,6 +142,7 @@ class SelfPlayWorker:
             greedy = move_count >= self.config.exploration.greedy_after_move
             forced = forced_move_policy(state) if self.config.use_tactical_selector else None
             forced_override_applied = False
+            forced_override_reason: str | None = None
 
             if forced is not None and not isinstance(current_agent, ModelAgent):
                 coord = forced.coord
@@ -191,6 +192,7 @@ class SelfPlayWorker:
                         if inference.was_overridden:
                             forced_override_count += 1
                             forced_override_applied = True
+                            forced_override_reason = inference.override_reason
                 else:
                     coord = current_agent.select_move(state)
                     policy_for_record = forced.policy if forced is not None else heuristic_policy(state)
@@ -205,6 +207,7 @@ class SelfPlayWorker:
                     coord,
                     state,
                     forced_override_applied=forced_override_applied,
+                    forced_override_reason=forced_override_reason,
                 )
                 if tactical_blunder:
                     forced_override_count += 1
@@ -365,6 +368,7 @@ class SelfPlayWorker:
         move: tuple[int, int],
         next_state: GameState,
         forced_override_applied: bool = False,
+        forced_override_reason: str | None = None,
     ) -> tuple[float, bool]:
         player = state.current_player
         opponent = "blue" if player == "red" else "red"
@@ -440,7 +444,11 @@ class SelfPlayWorker:
         reward -= opponent_next_turn_after * self.config.threat_exposure_penalty
         if forced_override_applied:
             reward -= self.config.forced_override_penalty
-        tactical_blunder = opponent_immediate_after > 0 or opponent_next_turn_after > 1
+            if forced_override_reason in {"win_now", "win_this_turn"}:
+                reward -= self.config.forced_override_penalty
+            elif forced_override_reason in {"block_now", "block_next_turn"}:
+                reward -= self.config.forced_override_penalty
+        tactical_blunder = forced_override_applied or opponent_immediate_after > 0 or opponent_next_turn_after > 1
         return reward, tactical_blunder
 
     def _terminal_reward(self, winner: str | None, candidate_color: str) -> float:
@@ -459,7 +467,7 @@ def _build_model_agent(config: TrainingConfig, state_dict: dict) -> ModelAgent:
     if torch is None:
         raise RuntimeError("torch is required for process self-play")
     model = HexGNNModel(config.model).to(config.device)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     return ModelAgent(model, config.device)
 
 

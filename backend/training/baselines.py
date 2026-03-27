@@ -117,6 +117,36 @@ def next_turn_winning_plans(state: GameState, player: str) -> list[tuple[Coord, 
     return _threat_plans(state, player, max_empty=2)
 
 
+def winning_moves_this_turn(state: GameState, player: str) -> dict[Coord, float]:
+    budget = state.placements_remaining_this_turn
+    if budget <= 0:
+        return {}
+    plans = [plan for plan in next_turn_winning_plans(state, player) if len(plan) <= budget]
+    if not plans:
+        return {}
+
+    scores = score_legal_moves(state)
+    move_scores: dict[Coord, float] = {}
+    for move in sorted(get_legal_moves(state)):
+        coverage = 0.0
+        for plan in plans:
+            if move in plan:
+                coverage += 10.0 if len(plan) == 1 else 4.0
+        if coverage <= 0:
+            continue
+        move_scores[move] = coverage * 1000.0 + scores.get(move, 0.0)
+
+    if not move_scores:
+        return {}
+    best = max(move_scores.values())
+    exp_scores = {
+        move: pow(2.718281828, (score - best) / 16.0)
+        for move, score in move_scores.items()
+    }
+    total = sum(exp_scores.values()) or 1.0
+    return {move: value / total for move, value in exp_scores.items() if value > 1e-9}
+
+
 def connected_components(state: GameState, player: str) -> list[set[Coord]]:
     owned = set(_occupied_by_player(state, player))
     components: list[set[Coord]] = []
@@ -214,15 +244,15 @@ def forced_move_policy(state: GameState) -> TacticalSelectorResult | None:
     opponent = "blue" if player == "red" else "red"
     scores = score_legal_moves(state)
 
-    winning_moves = immediate_winning_moves(state, player)
-    if winning_moves:
-        chosen = max(winning_moves, key=lambda move: (scores.get(move, 0.0), move))
-        weight = 1.0 / float(len(winning_moves))
+    winning_policy = winning_moves_this_turn(state, player)
+    if winning_policy:
+        winning_moves = tuple(sorted(move for move, prob in winning_policy.items() if prob > 0.0))
+        chosen = max(winning_policy.items(), key=lambda item: (item[1], scores.get(item[0], 0.0), item[0]))[0]
         return TacticalSelectorResult(
             coord=chosen,
-            policy={move: weight for move in winning_moves},
-            reason="win_now",
-            forced_moves=tuple(winning_moves),
+            policy=winning_policy,
+            reason="win_now" if any(len(plan) == 1 for plan in next_turn_winning_plans(state, player)) else "win_this_turn",
+            forced_moves=winning_moves,
         )
 
     blocking_policy = blocking_moves_for_next_turn(state, opponent)
@@ -232,7 +262,7 @@ def forced_move_policy(state: GameState) -> TacticalSelectorResult | None:
         return TacticalSelectorResult(
             coord=chosen,
             policy=blocking_policy,
-            reason="block_next_turn",
+            reason="block_now" if any(len(plan) == 1 for plan in next_turn_winning_plans(state, opponent)) else "block_next_turn",
             forced_moves=blocking_moves,
         )
 

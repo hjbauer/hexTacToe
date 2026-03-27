@@ -59,7 +59,7 @@ class OpponentPool:
 
     def _agent_from_snapshot(self, snapshot: ModelSnapshot) -> ModelAgent:
         model = HexGNNModel(self.model_config)
-        model.load_state_dict(snapshot.state_dict)
+        model.load_state_dict(snapshot.state_dict, strict=False)
         model.to(self.device)
         return ModelAgent(model, self.device)
 

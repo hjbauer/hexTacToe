@@ -881,7 +881,7 @@ class TrainingLoop:
             if torch.is_tensor(tensor) and tensor.dtype.is_floating_point:
                 state_dict[key] = tensor + (torch.randn_like(tensor) * self.config.mutation_std)
         target.model = self._new_model()
-        target.model.load_state_dict(state_dict)
+        target.model.load_state_dict(state_dict, strict=False)
         target.optimizer = self._new_optimizer(target.model)
         target.replay_buffer.clear()
         target.generation = max(primary_parent.generation, secondary_parent.generation if secondary_parent else 0) + 1
@@ -999,10 +999,14 @@ class TrainingLoop:
         else:
             self.population = self._create_population()
             leader = self.population[0]
-            leader.model.load_state_dict(payload["model_state_dict"])
-            leader.optimizer.load_state_dict(payload["optimizer_state_dict"])
+            leader.model.load_state_dict(payload["model_state_dict"], strict=False)
+            try:
+                leader.optimizer.load_state_dict(payload["optimizer_state_dict"])
+            except ValueError:
+                self._record_event("Loaded checkpoint with refreshed optimizer state")
         self.reference_model.load_state_dict(
-            payload.get("reference_model_state_dict", payload["model_state_dict"])
+            payload.get("reference_model_state_dict", payload["model_state_dict"]),
+            strict=False,
         )
         self.reference_elo = payload.get("reference_elo", self.config.initial_elo)
         self.app_state.training_status.iteration = payload["iteration"]
@@ -1036,9 +1040,12 @@ class TrainingLoop:
         self.population = []
         for item in payload:
             model = self._new_model()
-            model.load_state_dict(item["model_state_dict"])
+            model.load_state_dict(item["model_state_dict"], strict=False)
             optimizer = self._new_optimizer(model)
-            optimizer.load_state_dict(item["optimizer_state_dict"])
+            try:
+                optimizer.load_state_dict(item["optimizer_state_dict"])
+            except ValueError:
+                pass
             buffer = ReplayBuffer(
                 capacity=self.config.replay_buffer_capacity,
                 historical_fraction=self.config.replay_buffer_historical_fraction,

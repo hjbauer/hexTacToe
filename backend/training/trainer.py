@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+import multiprocessing
 import math
 import random
+import shutil
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -30,7 +36,7 @@ from backend.training.evaluator import EvaluationManager
 from backend.training.exploration import ExplorationScheduler
 from backend.training.opponent_pool import OpponentPool
 from backend.training.replay_buffer import ReplayBuffer
-from backend.training.self_play import SelfPlayResult, SelfPlayWorker
+from backend.training.self_play import SelfPlayJob, SelfPlayResult, SelfPlayWorker, run_self_play_job
 
 
 @dataclass
@@ -80,8 +86,11 @@ class TrainingLoop:
         self._stop_event = asyncio.Event()
         self._spectate_game_index = 0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._self_play_executor: Optional[ProcessPoolExecutor] = None
+        self._self_play_executor_workers: int = 0
         self._assign_lineage_roles()
         self._sync_serving_member()
+        self._set_reference_from_leader()
 
     def _new_model(self) -> HexGNNModel:
         return HexGNNModel(self.config.model).to(self.device)
@@ -170,6 +179,11 @@ class TrainingLoop:
         self.app_state.training_status.population_size = len(self.population)
         self.app_state.training_status.leader_model_name = leader.name
         self.app_state.training_status.leader_model_elo = leader.elo
+
+    def _set_reference_from_leader(self):
+        leader = self._leader_member()
+        self.reference_model.load_state_dict(leader.model.state_dict())
+        self.reference_elo = leader.elo
 
     def leaderboard(self) -> list[dict[str, Any]]:
         ranked = sorted(
@@ -283,6 +297,11 @@ class TrainingLoop:
             member.name: ModelAgent(member.model, self.device)
             for member in self.population
         }
+        population_state_dicts = {
+            member.name: copy.deepcopy(member.model.state_dict())
+            for member in self.population
+        }
+        leader_name = self._leader_member().name
         total_games = self.config.self_play_games_per_iteration
         total_progress = total_games * self.config.max_turns_per_game
         self._set_phase(
@@ -296,102 +315,195 @@ class TrainingLoop:
         candidates = self._scheduled_candidates(total_games)
         worker_count = max(1, min(self.config.parallel_self_play_workers, total_games))
         completed_games = 0
+        completed_move_count = 0
+        self.app_state.spectate_games = {}
+        self.app_state.current_spectate = None
+        await self._broadcast_spectate_state()
+        await self._broadcast_training_status()
 
-        for batch_start in range(0, total_games, worker_count):
-            if self._stop_event.is_set():
-                break
+        progress_dir = Path(tempfile.mkdtemp(prefix="hex-selfplay-progress-"))
+        next_candidate_index = 0
+        active_local_games = 0
+        pending_tasks: set[asyncio.Task] = set()
+        active_game_ids: set[str] = set()
+        active_process_game_ids: set[str] = set()
+        move_progress: dict[str, int] = {}
 
-            batch_candidates = candidates[batch_start:batch_start + worker_count]
-            self._set_phase(
-                "self_play",
-                f"Batch {batch_start + 1}-{batch_start + len(batch_candidates)} of {total_games}",
-                progress=batch_start * self.config.max_turns_per_game,
-                total=total_progress,
+        def observed_moves() -> int:
+            return completed_move_count + sum(move_progress.get(game_id, 0) for game_id in active_game_ids)
+
+        async def run_local_game(entry: dict[str, Any]):
+            member: PopulationMember = entry["candidate"]
+            opponent = entry["opponent"]
+            worker = SelfPlayWorker(
+                candidate_agent=population_agents[member.name],
+                reference_agent=ModelAgent(self.reference_model, self.device),
+                opponent_pool=self.opponent_pool,
+                config=self.config,
+                spectate_callback=self._broadcast_spectate,
+                stop_requested=self._stop_event.is_set,
+                opponent_override=(opponent["label"], opponent["agent"]),
+                candidate_label=member.name,
             )
-            self.app_state.spectate_games = {}
-            self.app_state.current_spectate = None
+            result = await asyncio.to_thread(worker.play_game, status.iteration, entry["game_id"])
+            return entry, result
+
+        async def run_process_game(entry: dict[str, Any]):
+            member: PopulationMember = entry["candidate"]
+            opponent = entry["opponent"]
+            job = SelfPlayJob(
+                config=self.config,
+                iteration=status.iteration,
+                game_id=entry["game_id"],
+                candidate_label=member.name,
+                candidate_state_dict=population_state_dicts[member.name],
+                opponent_label=opponent["label"],
+                opponent_kind=opponent["kind"],
+                opponent_state_dict=opponent.get("state_dict"),
+                progress_path=str(progress_dir / f"{entry['game_id']}.json"),
+            )
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(self._ensure_self_play_executor(), run_self_play_job, job)
+            return entry, result
+
+        async def launch_next_game() -> bool:
+            nonlocal next_candidate_index, active_local_games
+            if next_candidate_index >= total_games or self._stop_event.is_set():
+                return False
+            member = candidates[next_candidate_index]
+            next_candidate_index += 1
+            opponent = self._select_opponent(member, population_agents)
+            self._spectate_game_index += 1
+            game_id = f"sp-{self._spectate_game_index}"
+            snapshot = {
+                "type": "spectate_new_game",
+                "game_id": game_id,
+                "board_snapshot": {"red": [], "blue": []},
+                "opponent_type": opponent["label"],
+                "opponent_kind": opponent["kind"],
+                "opponent_name": opponent["name"],
+                "candidate_model": member.name,
+                "candidate_role": member.role,
+                "candidate_lineage": member.lineage,
+                "candidate_is_leader": member.name == leader_name,
+                "candidate_color": "waiting",
+                "opponent_color": "waiting",
+                "candidate_elo": member.elo,
+                "opponent_elo": opponent["elo"],
+                "opponent_role": opponent.get("member").role if opponent.get("member") is not None else opponent["kind"],
+                "move_count": 0,
+                "max_turns": self.config.max_turns_per_game,
+                "is_terminal": False,
+                "winner": None,
+            }
+            self.app_state.spectate_games[game_id] = snapshot
+            if self.app_state.current_spectate is None:
+                self.app_state.current_spectate = snapshot
+            entry = {
+                "candidate": member,
+                "opponent": opponent,
+                "game_id": game_id,
+            }
+            use_local = active_local_games < min(self.config.local_spectate_games_per_batch, worker_count)
+            if use_local:
+                active_local_games += 1
+                entry["execution"] = "local"
+                task = asyncio.create_task(run_local_game(entry))
+            else:
+                entry["execution"] = "process"
+                active_process_game_ids.add(game_id)
+                move_progress[game_id] = 0
+                task = asyncio.create_task(run_process_game(entry))
+            pending_tasks.add(task)
+            active_game_ids.add(game_id)
             await self._broadcast_spectate_state()
-            await self._broadcast_training_status()
+            return True
 
-            scheduled_games: list[dict[str, Any]] = []
-            for member in batch_candidates:
-                opponent = self._select_opponent(member, population_agents)
-                self._spectate_game_index += 1
-                game_id = f"sp-{self._spectate_game_index}"
-                snapshot = {
-                    "type": "spectate_new_game",
-                    "game_id": game_id,
-                    "board_snapshot": {"red": [], "blue": []},
-                    "opponent_type": opponent["label"],
-                    "candidate_model": member.name,
-                    "candidate_color": "waiting",
-                    "opponent_color": "waiting",
-                    "candidate_elo": member.elo,
-                    "opponent_elo": opponent["elo"],
-                    "move_count": 0,
-                    "max_turns": self.config.max_turns_per_game,
-                    "is_terminal": False,
-                    "winner": None,
-                }
-                self.app_state.spectate_games[game_id] = snapshot
-                if self.app_state.current_spectate is None:
-                    self.app_state.current_spectate = snapshot
-                scheduled_games.append(
-                    {
-                        "candidate": member,
-                        "opponent": opponent,
-                        "game_id": game_id,
-                    }
-                )
+        async def poll_live_progress():
+            while (pending_tasks or active_process_game_ids) and not self._stop_event.is_set():
+                changed = False
+                for game_id in list(active_process_game_ids):
+                    progress_path = progress_dir / f"{game_id}.json"
+                    if not progress_path.exists():
+                        continue
+                    try:
+                        snapshot = json.loads(progress_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    previous_move_count = move_progress.get(game_id, 0)
+                    move_count = int(snapshot.get("move_count") or 0)
+                    move_progress[game_id] = move_count
+                    merged = {**self.app_state.spectate_games.get(game_id, {}), **snapshot}
+                    self.app_state.spectate_games[game_id] = merged
+                    self.app_state.current_spectate = merged
+                    changed = changed or move_count != previous_move_count
+                if changed:
+                    self._set_phase(
+                        "self_play",
+                        f"Played {completed_games}/{total_games} league games | {observed_moves()} moves observed",
+                        progress=observed_moves(),
+                        total=total_progress,
+                    )
+                    await self._broadcast_spectate_state()
+                    await self._broadcast_training_status()
+                await asyncio.sleep(0.2)
 
-            await self._broadcast_spectate_state()
+        for _ in range(min(worker_count, total_games)):
+            await launch_next_game()
 
-            async def run_game(entry: dict[str, Any]):
-                member: PopulationMember = entry["candidate"]
-                opponent = entry["opponent"]
-                worker = SelfPlayWorker(
-                    candidate_agent=population_agents[member.name],
-                    reference_agent=ModelAgent(self.reference_model, self.device),
-                    opponent_pool=self.opponent_pool,
-                    config=self.config,
-                    spectate_callback=self._broadcast_spectate,
-                    stop_requested=self._stop_event.is_set,
-                    opponent_override=(opponent["label"], opponent["agent"]),
-                    candidate_label=member.name,
-                )
-                result = await asyncio.to_thread(worker.play_game, status.iteration, entry["game_id"])
-                return entry, result
-
-            tasks = [asyncio.create_task(run_game(entry)) for entry in scheduled_games]
-            for task in asyncio.as_completed(tasks):
-                entry, result = await task
-                if self._stop_event.is_set():
-                    continue
-                member = entry["candidate"]
-                opponent = entry["opponent"]
-                member.replay_buffer.add(result.experiences)
-                self.replay_buffer.add(result.experiences)
-                self._apply_match_result(member, opponent, result)
-                status.episode += 1
-                status.games_played += 1
-                status.forced_override_count += result.forced_override_count
-                status.model_decision_count += result.model_decision_count
-                status.forced_override_rate = (
-                    status.forced_override_count / status.model_decision_count
-                    if status.model_decision_count
-                    else 0.0
-                )
-                completed_games += 1
-                status.entropy_warning = status.entropy_warning or result.entropy_warning
-                self._assign_lineage_roles()
-                self._sync_serving_member()
-                self._set_phase(
-                    "self_play",
-                    f"Played {completed_games}/{total_games} league games",
-                    progress=completed_games * self.config.max_turns_per_game,
-                    total=total_progress,
-                )
-                await self._broadcast_training_status()
+        poller = asyncio.create_task(poll_live_progress())
+        try:
+            while pending_tasks:
+                done, pending = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+                pending_tasks = set(pending)
+                for task in done:
+                    entry, result = await task
+                    game_id = entry["game_id"]
+                    active_game_ids.discard(game_id)
+                    active_process_game_ids.discard(game_id)
+                    if entry.get("execution") == "local":
+                        active_local_games = max(active_local_games - 1, 0)
+                    move_progress.pop(game_id, None)
+                    self.app_state.spectate_games.pop(game_id, None)
+                    if self.app_state.current_spectate is not None and self.app_state.current_spectate.get("game_id") == game_id:
+                        self.app_state.current_spectate = None
+                    if self._stop_event.is_set():
+                        continue
+                    member = entry["candidate"]
+                    opponent = entry["opponent"]
+                    member.replay_buffer.add(result.experiences)
+                    self.replay_buffer.add(result.experiences)
+                    self._apply_match_result(member, opponent, result)
+                    status.episode += 1
+                    status.games_played += 1
+                    status.forced_override_count += result.forced_override_count
+                    status.model_decision_count += result.model_decision_count
+                    status.forced_override_rate = (
+                        status.forced_override_count / status.model_decision_count
+                        if status.model_decision_count
+                        else 0.0
+                    )
+                    completed_games += 1
+                    completed_move_count += result.move_count
+                    status.entropy_warning = status.entropy_warning or result.entropy_warning
+                    self._assign_lineage_roles()
+                    self._sync_serving_member()
+                    await launch_next_game()
+                    self._set_phase(
+                        "self_play",
+                        f"Played {completed_games}/{total_games} league games | {observed_moves()} moves observed",
+                        progress=observed_moves(),
+                        total=total_progress,
+                    )
+                    await self._broadcast_spectate_state()
+                    await self._broadcast_training_status()
+        finally:
+            poller.cancel()
+            try:
+                await poller
+            except asyncio.CancelledError:
+                pass
+            shutil.rmtree(progress_dir, ignore_errors=True)
 
         if self._stop_event.is_set():
             self._set_phase("idle", "Stopping training", progress=0, total=0)
@@ -463,6 +575,7 @@ class TrainingLoop:
                 "name": "reference",
                 "elo": self.reference_elo,
                 "agent": ModelAgent(self.reference_model, self.device),
+                "state_dict": copy.deepcopy(self.reference_model.state_dict()),
                 "member": None,
             }
         if selection == "pool":
@@ -473,14 +586,15 @@ class TrainingLoop:
                 weights=[strategy_weights[key] for key in strategy_choices],
                 k=1,
             )[0]
-            pool_agent = self.opponent_pool.sample_opponent(strategy)
-            if pool_agent is not None:
+            pool_snapshot = self.opponent_pool.sample_snapshot(strategy)
+            if pool_snapshot is not None:
                 return {
                     "label": f"pool:{strategy}",
                     "kind": "pool",
                     "name": f"pool:{strategy}",
                     "elo": self.reference_elo,
-                    "agent": pool_agent,
+                    "agent": self.opponent_pool.agent_from_snapshot(pool_snapshot),
+                    "state_dict": copy.deepcopy(pool_snapshot.state_dict),
                     "member": None,
                 }
         return {
@@ -489,6 +603,7 @@ class TrainingLoop:
             "name": "random",
             "elo": 800.0,
             "agent": RandomBaseline(),
+            "state_dict": None,
             "member": None,
         }
 
@@ -513,8 +628,25 @@ class TrainingLoop:
             "name": opponent.name,
             "elo": opponent.elo,
             "agent": population_agents[opponent.name],
+            "state_dict": copy.deepcopy(opponent.model.state_dict()),
             "member": opponent,
         }
+
+    def _ensure_self_play_executor(self) -> ProcessPoolExecutor:
+        target_workers = max(1, self.config.parallel_self_play_workers - self.config.local_spectate_games_per_batch)
+        if (
+            self._self_play_executor is None
+            or self._self_play_executor_workers != target_workers
+        ):
+            if self._self_play_executor is not None:
+                self._self_play_executor.shutdown(wait=False, cancel_futures=True)
+            context = multiprocessing.get_context("spawn")
+            self._self_play_executor = ProcessPoolExecutor(
+                max_workers=target_workers,
+                mp_context=context,
+            )
+            self._self_play_executor_workers = target_workers
+        return self._self_play_executor
 
     def _apply_match_result(self, candidate: PopulationMember, opponent: dict[str, Any], result: SelfPlayResult):
         score = 0.5 if result.winner is None else (1.0 if result.winner == result.candidate_color else 0.0)
@@ -774,8 +906,9 @@ class TrainingLoop:
     def _broadcast_spectate(self, message: dict):
         if message.get("type") != "spectate_move":
             return
-        self.app_state.current_spectate = dict(message)
-        self.app_state.spectate_games[message["game_id"]] = dict(message)
+        merged = {**self.app_state.spectate_games.get(message["game_id"], {}), **dict(message)}
+        self.app_state.current_spectate = merged
+        self.app_state.spectate_games[message["game_id"]] = merged
         if self.app_state.ws_manager is not None and self._loop is not None:
             self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_spectate_state()))
 
@@ -792,12 +925,17 @@ class TrainingLoop:
 
     def checkpoint_payload(self, is_reference: bool) -> dict:
         leader = self._leader_member()
+        model_state = copy.deepcopy(leader.model.state_dict())
+        reference_state = (
+            copy.deepcopy(model_state)
+            if is_reference
+            else copy.deepcopy(self.reference_model.state_dict())
+        )
+        optimizer_state = copy.deepcopy(leader.optimizer.state_dict())
         return {
-            "model_state_dict": leader.model.state_dict(),
-            "reference_model_state_dict": (
-                leader.model.state_dict() if is_reference else self.reference_model.state_dict()
-            ),
-            "optimizer_state_dict": leader.optimizer.state_dict(),
+            "model_state_dict": model_state,
+            "reference_model_state_dict": reference_state,
+            "optimizer_state_dict": optimizer_state,
             "model_config": self.config.model.to_dict(),
             "training_config": self.config.to_dict(),
             "iteration": self.app_state.training_status.iteration,
@@ -811,7 +949,10 @@ class TrainingLoop:
             "leader_model_name": leader.name,
             "eval_history": list(self.app_state.eval_metrics.promotion_history),
             "is_reference": is_reference,
-            "replay_buffer": self.replay_buffer.serialize(),
+            "replay_buffer": self.replay_buffer.serialize(
+                max_recent=self.config.checkpoint_recent_samples,
+                max_historical=self.config.checkpoint_historical_samples,
+            ),
             "opponent_pool": self.opponent_pool.serialize(),
             "eval_metrics": self.app_state.eval_metrics.to_dict(),
         }
@@ -824,9 +965,12 @@ class TrainingLoop:
                 "role": member.role,
                 "generation": member.generation,
                 "parent_names": list(member.parent_names),
-                "model_state_dict": member.model.state_dict(),
-                "optimizer_state_dict": member.optimizer.state_dict(),
-                "replay_buffer": member.replay_buffer.serialize(),
+                "model_state_dict": copy.deepcopy(member.model.state_dict()),
+                "optimizer_state_dict": copy.deepcopy(member.optimizer.state_dict()),
+                "replay_buffer": member.replay_buffer.serialize(
+                    max_recent=self.config.checkpoint_member_recent_samples,
+                    max_historical=self.config.checkpoint_member_historical_samples,
+                ),
                 "games": member.games,
                 "wins": member.wins,
                 "losses": member.losses,
@@ -885,6 +1029,7 @@ class TrainingLoop:
         self.app_state.training_status.opponent_pool_size = len(self.opponent_pool)
         self._assign_lineage_roles()
         self._sync_serving_member()
+        self._set_reference_from_leader()
         self._record_event(f"Checkpoint loaded: {path.split('/')[-1]}")
 
     def _load_population(self, payload: list[dict[str, Any]]):
@@ -923,6 +1068,10 @@ class TrainingLoop:
             self.population = self._create_population()
 
     def reset(self):
+        if self._self_play_executor is not None:
+            self._self_play_executor.shutdown(wait=False, cancel_futures=True)
+            self._self_play_executor = None
+            self._self_play_executor_workers = 0
         self.population = self._create_population()
         self.reference_model = self._new_model()
         self.reference_model.load_state_dict(self.population[0].model.state_dict())
@@ -935,6 +1084,7 @@ class TrainingLoop:
         self.app_state.spectate_games = {}
         self._assign_lineage_roles()
         self._sync_serving_member()
+        self._set_reference_from_leader()
 
     def list_checkpoints(self) -> list[str]:
         return list_checkpoints()

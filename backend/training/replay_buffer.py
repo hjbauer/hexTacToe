@@ -42,10 +42,33 @@ class ReplayBuffer:
         self._recent.clear()
         self._historical.clear()
 
-    def serialize(self) -> dict[str, list[GNNExperience]]:
+    def _downsample(self, items: list[GNNExperience], max_items: int | None, keep_recent: bool) -> list[GNNExperience]:
+        if max_items is None or max_items <= 0 or len(items) <= max_items:
+            return list(items)
+        if keep_recent:
+            return list(items[-max_items:])
+        if max_items == 1:
+            return [items[-1]]
+        step = (len(items) - 1) / float(max_items - 1)
+        selected = []
+        seen: set[int] = set()
+        for index in range(max_items):
+            raw_idx = int(round(index * step))
+            clamped = max(0, min(len(items) - 1, raw_idx))
+            while clamped in seen and clamped < len(items) - 1:
+                clamped += 1
+            seen.add(clamped)
+            selected.append(items[clamped])
+        return selected
+
+    def serialize(
+        self,
+        max_recent: int | None = None,
+        max_historical: int | None = None,
+    ) -> dict[str, list[GNNExperience]]:
         return {
-            "recent": list(self._recent),
-            "historical": list(self._historical),
+            "recent": self._downsample(list(self._recent), max_recent, keep_recent=True),
+            "historical": self._downsample(list(self._historical), max_historical, keep_recent=False),
         }
 
     def load(self, experiences: list[GNNExperience] | dict[str, list[GNNExperience]]):

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
 import math
+import os
 import random
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from backend.config import TrainingConfig
 from backend.game.game_state import GameState
-from backend.game.rules import get_legal_moves
+from backend.game.hex_coord import hex_distance
 from backend.game.rules import apply_move
+from backend.game.rules import get_legal_moves
 from backend.model.graph_builder import GNNExperience, GraphBuilder, color_swap
 from backend.model.inference import ModelAgent
+from backend.model.network import HexGNNModel
 from backend.training.baselines import (
     RandomBaseline,
     adjacent_friendly_count,
@@ -26,6 +30,11 @@ from backend.training.baselines import (
 from backend.training.exploration import ExplorationScheduler
 from backend.training.opponent_pool import OpponentPool
 
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None
+
 
 @dataclass
 class SelfPlayResult:
@@ -36,6 +45,20 @@ class SelfPlayResult:
     entropy_warning: bool
     forced_override_count: int
     model_decision_count: int
+    final_snapshot: dict | None = None
+
+
+@dataclass
+class SelfPlayJob:
+    config: TrainingConfig
+    iteration: int
+    game_id: str
+    candidate_label: str
+    candidate_state_dict: dict
+    opponent_label: str
+    opponent_kind: str
+    opponent_state_dict: dict | None = None
+    progress_path: str | None = None
 
 
 @dataclass
@@ -251,6 +274,23 @@ class SelfPlayWorker:
             entropy_warning=entropy_warning,
             forced_override_count=forced_override_count,
             model_decision_count=model_decision_count,
+            final_snapshot={
+                "type": "spectate_move",
+                "game_id": game_id,
+                "turn_number": state.turn_number,
+                "is_terminal": state.is_terminal,
+                "winner": state.winner,
+                "board_snapshot": {
+                    "red": [list(item) for item in sorted(state.red_hexes)],
+                    "blue": [list(item) for item in sorted(state.blue_hexes)],
+                },
+                "opponent_type": opponent_type,
+                "candidate_model": self.candidate_label,
+                "candidate_color": candidate_color,
+                "opponent_color": "blue" if candidate_color == "red" else "red",
+                "move_count": move_count,
+                "max_turns": self.config.max_turns_per_game,
+            },
         )
 
     def _heuristic_weight(self, iteration: int) -> float:
@@ -270,6 +310,21 @@ class SelfPlayWorker:
         immediate = sum(1 for plan in plans if len(plan) == 1)
         next_turn = sum(1 for plan in plans if len(plan) == 2)
         return immediate, next_turn
+
+    def _component_sizes(self, state: GameState, player: str) -> list[int]:
+        return sorted((len(component) for component in connected_components(state, player)), reverse=True)
+
+    def _component_containing_move(self, state: GameState, player: str, move: tuple[int, int]) -> set[tuple[int, int]] | None:
+        for component in connected_components(state, player):
+            if move in component:
+                return component
+        return None
+
+    def _nearest_existing_friendly_distance(self, state: GameState, player: str, move: tuple[int, int]) -> int:
+        owned = state.red_hexes if player == "red" else state.blue_hexes
+        if not owned:
+            return 0
+        return min(hex_distance(move[0], move[1], coord[0], coord[1]) for coord in owned)
 
     def _loss_hindsight_experiences(
         self,
@@ -320,28 +375,64 @@ class SelfPlayWorker:
         player_immediate_after, player_next_turn_after = self._tactical_counts(next_state, player)
         opponent_immediate_before, opponent_next_turn_before = self._tactical_counts(state, opponent)
         opponent_immediate_after, opponent_next_turn_after = self._tactical_counts(next_state, opponent)
+        must_defend = opponent_immediate_before > 0 or opponent_next_turn_before > 0
 
-        reward += max(player_next_turn_after - player_next_turn_before, 0) * self.config.next_turn_threat_reward
-        created_pressure = player_immediate_after + player_next_turn_after
-        if created_pressure >= 2:
-            reward += min(created_pressure - 1, 2) * self.config.multi_threat_bonus
+        threat_reduction = (opponent_immediate_before + opponent_next_turn_before) - (
+            opponent_immediate_after + opponent_next_turn_after
+        )
+        if not must_defend:
+            reward += max(player_next_turn_after - player_next_turn_before, 0) * self.config.next_turn_threat_reward
+            created_pressure = player_immediate_after + player_next_turn_after
+            if created_pressure >= 2:
+                reward += min(created_pressure - 1, 2) * self.config.multi_threat_bonus
+            reward += adjacent_friendly_count(state, player, move) * self.config.adjacency_reward
         if move in get_legal_moves(state) and would_win_if_played(state, opponent, move):
             reward += self.config.block_threat_reward
-        if (opponent_immediate_after + opponent_next_turn_after) < (
-            opponent_immediate_before + opponent_next_turn_before
-        ):
-            reward += self.config.block_threat_reward
-        reward += adjacent_friendly_count(state, player, move) * self.config.adjacency_reward
+        if threat_reduction > 0:
+            reward += threat_reduction * self.config.block_threat_reward
 
         before_components = connected_components(state, player)
         after_components = connected_components(next_state, player)
+        before_component_sizes = sorted((len(component) for component in before_components), reverse=True)
+        after_component_sizes = sorted((len(component) for component in after_components), reverse=True)
+        second_before = before_component_sizes[1] if len(before_component_sizes) > 1 else 0
+        second_after = after_component_sizes[1] if len(after_component_sizes) > 1 else 0
+        move_component = self._component_containing_move(next_state, player, move)
+        move_component_size = len(move_component) if move_component is not None else 0
+        nearest_existing_distance = self._nearest_existing_friendly_distance(state, player, move)
+        is_second_placement = state.placements_this_turn > 0
         before_nearest = average_nearest_friendly_distance(state, player)
         after_nearest = average_nearest_friendly_distance(next_state, player)
-        reward += max(before_nearest - after_nearest, 0.0) * self.config.compactness_reward
-        if len(before_components) > len(after_components):
-            reward += self.config.compactness_reward
+        is_free_expansion_move = (
+            not must_defend
+            and not next_state.is_terminal
+            and
+            is_second_placement
+            and opponent_immediate_before == 0
+            and opponent_next_turn_before == 0
+        )
+        seeded_new_front = bool(
+            is_free_expansion_move
+            and len(before_components) == 1
+            and len(after_components) == 2
+            and move_component_size == 1
+            and 3 <= nearest_existing_distance <= 8
+        )
+        if not must_defend:
+            reward += max(before_nearest - after_nearest, 0.0) * self.config.compactness_reward
+            if len(before_components) > len(after_components):
+                reward += self.config.compactness_reward
+            if seeded_new_front:
+                reward += self.config.colony_seed_reward
+            if second_after > second_before:
+                reward += min(second_after - second_before, 2) * self.config.multi_front_growth_reward
+            if second_after >= 2 and player_next_turn_after > 0:
+                reward += self.config.multi_front_threat_bonus
         reward -= max(len(after_components) - 2, 0) * self.config.colony_penalty
-        reward -= sum(1 for component in after_components if len(component) == 1) * self.config.isolated_stone_penalty
+        isolated_components = sum(1 for component in after_components if len(component) == 1)
+        if seeded_new_front and isolated_components > 0:
+            isolated_components -= 1
+        reward -= isolated_components * self.config.isolated_stone_penalty
 
         if next_state.is_terminal and next_state.winner == player and move in immediate_winning_moves(state, player):
             reward -= self.config.trivial_win_penalty
@@ -362,3 +453,64 @@ class SelfPlayWorker:
     def _normalize_return(self, reward: float) -> float:
         scale = max(self.config.reward_normalization_scale, 1e-6)
         return max(-1.0, min(1.0, reward / scale))
+
+
+def _build_model_agent(config: TrainingConfig, state_dict: dict) -> ModelAgent:
+    if torch is None:
+        raise RuntimeError("torch is required for process self-play")
+    model = HexGNNModel(config.model).to(config.device)
+    model.load_state_dict(state_dict)
+    return ModelAgent(model, config.device)
+
+
+def _write_progress_snapshot(progress_path: str, snapshot: dict):
+    temp_path = f"{progress_path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(snapshot, handle)
+    os.replace(temp_path, progress_path)
+
+
+def run_self_play_job(job: SelfPlayJob) -> SelfPlayResult:
+    if torch is not None:
+        torch.set_num_threads(max(1, job.config.self_play_worker_torch_threads))
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+
+    candidate_agent = _build_model_agent(job.config, job.candidate_state_dict)
+    if job.opponent_kind == "random":
+        opponent_agent = RandomBaseline()
+    elif job.opponent_kind == "heuristic":
+        from backend.training.baselines import HeuristicBaseline
+
+        opponent_agent = HeuristicBaseline()
+    elif job.opponent_state_dict is not None:
+        opponent_agent = _build_model_agent(job.config, job.opponent_state_dict)
+    else:
+        opponent_agent = RandomBaseline()
+
+    spectate_callback = None
+    if job.progress_path:
+        def spectate_callback(message: dict):
+            if message.get("type") == "spectate_move":
+                _write_progress_snapshot(job.progress_path, message)
+
+    worker = SelfPlayWorker(
+        candidate_agent=candidate_agent,
+        reference_agent=None,
+        opponent_pool=OpponentPool(
+            model_config=job.config.model,
+            max_size=job.config.eval.opponent_pool_max_size,
+            device=job.config.device,
+        ),
+        config=job.config,
+        spectate_callback=spectate_callback,
+        stop_requested=None,
+        opponent_override=(job.opponent_label, opponent_agent),
+        candidate_label=job.candidate_label,
+    )
+    result = worker.play_game(job.iteration, job.game_id)
+    if job.progress_path and result.final_snapshot is not None:
+        _write_progress_snapshot(job.progress_path, result.final_snapshot)
+    return result

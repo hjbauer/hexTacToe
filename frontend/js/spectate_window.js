@@ -89,7 +89,8 @@ class SpectateWindow {
     this.activeCountEl.textContent = `Active Games: ${games.length || 0}`;
 
     const visibleCount = Math.max(1, Number(this.countSelectEl.value || 8));
-    const visibleGames = games.slice(0, visibleCount);
+    const rankedGames = [...games].sort((left, right) => this.interestScore(right) - this.interestScore(left));
+    const visibleGames = rankedGames.slice(0, visibleCount);
     this.ensureSlots(visibleCount);
 
     visibleGames.forEach((game, index) => this.renderSlot(this.slots[index], game));
@@ -139,6 +140,8 @@ class SpectateWindow {
 
     const title = document.createElement("strong");
     title.textContent = `Game ${index + 1}`;
+    const badge = document.createElement("span");
+    badge.className = "spectate-interest-badge hidden";
     const candidate = document.createElement("span");
     candidate.textContent = "Candidate: waiting";
     const opponent = document.createElement("span");
@@ -147,6 +150,7 @@ class SpectateWindow {
     move.textContent = "Move: 0 / 0";
 
     header.appendChild(title);
+    header.appendChild(badge);
     header.appendChild(candidate);
     header.appendChild(opponent);
     header.appendChild(move);
@@ -163,6 +167,7 @@ class SpectateWindow {
       root,
       header,
       title,
+      badge,
       candidate,
       opponent,
       move,
@@ -227,10 +232,13 @@ class SpectateWindow {
       slot.currentGameId = null;
       slot.currentBoard = { red: [], blue: [] };
       slot.title.textContent = "Game: waiting";
+      slot.badge.textContent = "";
+      slot.badge.classList.add("hidden");
       slot.candidate.textContent = "Candidate: waiting";
       slot.opponent.textContent = "Opponent: waiting";
       slot.move.textContent = "Move: 0 / 0";
       slot.root.classList.remove("spectate-terminal");
+      slot.root.classList.remove("spectate-interest", "spectate-top-game", "spectate-reference-game");
       slot.canvas.render(slot.currentBoard, { message: "Waiting for game" });
       return;
     }
@@ -242,12 +250,18 @@ class SpectateWindow {
     const overlayBoard = this.overlayFor(game.game_id);
     slot.currentBoard = this.mergedBoard(baseBoard, overlayBoard);
     slot.title.textContent = `Game: ${game.game_id}`;
+    const badgeLabel = this.interestLabel(game);
+    slot.badge.textContent = badgeLabel || "";
+    slot.badge.classList.toggle("hidden", !badgeLabel);
     slot.candidate.textContent =
-      `Candidate: ${game.candidate_model || "unknown"} (${game.candidate_color || "?"})`;
+      `Candidate: ${game.candidate_model || "unknown"} ${this.roleText(game.candidate_role)} (${game.candidate_color || "?"}) | Elo ${this.formatElo(game.candidate_elo)}`;
     slot.opponent.textContent =
-      `Opponent: ${game.opponent_type || "unknown"} (${game.opponent_color || "?"})`;
+      `Opponent: ${game.opponent_name || game.opponent_type || "unknown"} ${this.roleText(game.opponent_role)} (${game.opponent_color || "?"}) | Elo ${this.formatElo(game.opponent_elo)}`;
     slot.move.textContent = `Move: ${game.move_count || 0} / ${game.max_turns || 0}`;
     slot.root.classList.toggle("spectate-terminal", Boolean(game.is_terminal));
+    slot.root.classList.toggle("spectate-interest", this.interestScore(game) >= 8);
+    slot.root.classList.toggle("spectate-top-game", Boolean(game.candidate_is_leader));
+    slot.root.classList.toggle("spectate-reference-game", String(game.opponent_kind || "").includes("reference"));
     slot.canvas.render(
       slot.currentBoard,
       game.is_terminal ? { message: `Winner: ${game.winner || "draw"}` } : {}
@@ -255,6 +269,41 @@ class SpectateWindow {
     if (isNewGame && (!slot.currentBoard.red.length && !slot.currentBoard.blue.length)) {
       slot.canvas.render(slot.currentBoard, { message: "Opening..." });
     }
+  }
+
+  roleText(role) {
+    return role ? `[${role}]` : "";
+  }
+
+  formatElo(value) {
+    return Number.isFinite(Number(value)) ? Math.round(Number(value)) : "?";
+  }
+
+  interestScore(game) {
+    let score = 0;
+    if (game.candidate_is_leader) score += 10;
+    if (String(game.opponent_kind || "").includes("reference")) score += 8;
+    if (game.candidate_role === "champion") score += 5;
+    if (game.opponent_role === "champion") score += 4;
+    score += Math.round((Number(game.candidate_elo || 0) + Number(game.opponent_elo || 0)) / 200);
+    if (!(game.is_terminal)) score += 1;
+    return score;
+  }
+
+  interestLabel(game) {
+    if (game.candidate_is_leader && String(game.opponent_kind || "").includes("reference")) {
+      return "Leader vs Reference";
+    }
+    if (game.candidate_is_leader) {
+      return "Leader Table";
+    }
+    if (String(game.opponent_kind || "").includes("reference")) {
+      return "Reference Match";
+    }
+    if (game.candidate_role === "champion" || game.opponent_role === "champion") {
+      return "Champion Game";
+    }
+    return "";
   }
 
   scheduleResize() {

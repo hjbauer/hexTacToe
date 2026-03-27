@@ -4,7 +4,7 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from backend.training.checkpoint import clear_checkpoints, list_checkpoints
+from backend.training.checkpoint import list_checkpoints
 from backend.training.trainer import TrainingLoop
 
 router = APIRouter(prefix="/api/training", tags=["training"])
@@ -37,7 +37,7 @@ async def stop_training(request: Request):
     if app_state.training_task is not None:
         try:
             await asyncio.wait_for(app_state.training_task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
     return {"ok": True, "status": app_state.training_status.to_dict()}
 
@@ -112,12 +112,11 @@ async def reset_training(request: Request):
     if app_state.training_task is not None:
         try:
             await asyncio.wait_for(app_state.training_task, timeout=2.0)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         app_state.training_task = None
     _require_trainer(app_state)
     app_state.trainer.reset()
-    clear_checkpoints()
     app_state.current_spectate = None
     app_state.spectate_games = {}
     return {"ok": True, "status": app_state.training_status.to_dict()}

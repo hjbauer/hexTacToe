@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,27 @@ def save_checkpoint(payload: dict[str, Any], keep_last: int = 10) -> str:
     path = checkpoint_path(payload["iteration"], payload["episode"])
     payload = dict(payload)
     payload["saved_at"] = time.time()
-    torch.save(payload, path)
+    fd, tmp_path = tempfile.mkstemp(prefix=path.stem + ".", suffix=".tmp", dir=CHECKPOINT_DIR)
+    os.close(fd)
+    backup_path: str | None = None
+    try:
+        torch.save(payload, tmp_path)
+        if path.exists():
+            backup_path = str(path.with_suffix(path.suffix + ".bak"))
+            if os.path.exists(backup_path):
+                os.unlink(backup_path)
+            os.replace(path, backup_path)
+        os.replace(tmp_path, path)
+        torch.load(path, map_location="cpu", weights_only=False)
+        if backup_path is not None and os.path.exists(backup_path):
+            os.unlink(backup_path)
+    except Exception:
+        if backup_path is not None and os.path.exists(backup_path):
+            os.replace(backup_path, path)
+        raise
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
     _prune_checkpoints(keep_last)
     return str(path)
 

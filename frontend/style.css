@@ -462,6 +462,19 @@ button.active-toggle {
   box-shadow: var(--shadow);
 }
 
+.spectate-interest {
+  border-color: rgba(181, 140, 47, 0.5);
+  box-shadow: 0 16px 40px rgba(104, 80, 24, 0.16);
+}
+
+.spectate-top-game {
+  outline: 3px solid rgba(194, 71, 45, 0.42);
+}
+
+.spectate-reference-game {
+  background: linear-gradient(180deg, rgba(255, 252, 246, 0.9), rgba(239, 246, 235, 0.9));
+}
+
 .spectate-card-header {
   display: flex;
   gap: 8px;
@@ -473,6 +486,16 @@ button.active-toggle {
 .spectate-card-header strong {
   color: var(--text);
   margin-right: auto;
+}
+
+.spectate-interest-badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(194, 71, 45, 0.12);
+  color: #8b331f;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .spectate-board-frame {

@@ -18,9 +18,9 @@ class ModelConfig:
 
 @dataclass
 class EvalConfig:
-    eval_interval: int = 100
+    eval_interval: int = 10
     eval_games: int = 12
-    promotion_threshold: float = 0.55
+    promotion_threshold: float = 0.60
     opponent_pool_max_size: int = 15
     snapshot_interval: int = 20
 
@@ -55,12 +55,18 @@ class TrainingConfig:
     replay_buffer_capacity: int = 100_000
     replay_buffer_historical_fraction: float = 0.2
     batch_size: int = 32
-    self_play_games_per_iteration: int = 16
-    parallel_self_play_workers: int = 16
+    self_play_games_per_iteration: int = 24
+    parallel_self_play_workers: int = 8
+    local_spectate_games_per_batch: int = 1
+    self_play_worker_torch_threads: int = 1
     gradient_steps_per_iteration: int = 2
     min_buffer_size_to_train: int = 32
-    checkpoint_interval: int = 0
-    keep_last_checkpoints: int = 10
+    checkpoint_interval: int = 20
+    keep_last_checkpoints: int = 1
+    checkpoint_recent_samples: int = 1024
+    checkpoint_historical_samples: int = 256
+    checkpoint_member_recent_samples: int = 256
+    checkpoint_member_historical_samples: int = 64
     max_turns_per_game: int = 200
     population_size: int = 6
     lineage_count: int = 3
@@ -78,20 +84,23 @@ class TrainingConfig:
     use_tactical_selector: bool = False
     shaped_reward_discount: float = 0.95
     terminal_win_reward: float = 10.0
-    terminal_loss_reward: float = -10.0
+    terminal_loss_reward: float = -18.0
     draw_reward: float = -1.5
     line_extension_reward: float = 0.8
-    block_threat_reward: float = 1.2
+    block_threat_reward: float = 3.0
     adjacency_reward: float = 0.1
     forced_override_penalty: float = 0.0
     next_turn_threat_reward: float = 1.0
     multi_threat_bonus: float = 1.75
     trivial_win_penalty: float = 1.25
-    trivial_loss_penalty: float = 4.0
-    threat_exposure_penalty: float = 1.4
+    trivial_loss_penalty: float = 9.0
+    threat_exposure_penalty: float = 3.5
     compactness_reward: float = 0.4
     colony_penalty: float = 0.75
     isolated_stone_penalty: float = 0.2
+    colony_seed_reward: float = 0.9
+    multi_front_growth_reward: float = 1.1
+    multi_front_threat_bonus: float = 1.0
     hindsight_corrections_per_loss: int = 2
     reward_normalization_scale: float = 10.0
     opening_random_moves: int = 4

@@ -54,6 +54,9 @@ class OpponentPool:
             return self.snapshots[0]
         return random.choice(self.snapshots)
 
+    def sample_snapshot(self, strategy: str = "uniform") -> ModelSnapshot | None:
+        return self._sample_snapshot(strategy)
+
     def _agent_from_snapshot(self, snapshot: ModelSnapshot) -> ModelAgent:
         model = HexGNNModel(self.model_config)
         model.load_state_dict(snapshot.state_dict)

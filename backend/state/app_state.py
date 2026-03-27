@@ -30,8 +30,10 @@ class TrainingStatus:
     games_played: int = 0
     loss_policy: float = 0.0
     loss_value: float = 0.0
+    loss_aux: float = 0.0
     replay_buffer_size: int = 0
     current_temperature: float = 1.0
+    current_max_turns: int = 0
     latest_checkpoint_path: Optional[str] = None
     reference_checkpoint_path: Optional[str] = None
     loss_history: list[dict[str, float | int]] = field(default_factory=list)
@@ -45,6 +47,22 @@ class TrainingStatus:
     forced_override_count: int = 0
     model_decision_count: int = 0
     forced_override_rate: float = 0.0
+    tactical_opportunity_count: int = 0
+    tactical_blunder_count: int = 0
+    tactical_blunder_rate: float = 0.0
+    win_opportunity_count: int = 0
+    missed_win_count: int = 0
+    missed_win_rate: float = 0.0
+    block_opportunity_count: int = 0
+    missed_block_count: int = 0
+    missed_block_rate: float = 0.0
+    training_wins: int = 0
+    training_losses: int = 0
+    training_draws: int = 0
+    training_win_rate: float = 0.0
+    training_loss_rate: float = 0.0
+    training_draw_rate: float = 0.0
+    avg_game_length: float = 0.0
     population_size: int = 1
     leader_model_name: str = "model-1"
     leader_model_elo: float = 1200.0
@@ -57,8 +75,10 @@ class TrainingStatus:
             "games_played": self.games_played,
             "loss_policy": self.loss_policy,
             "loss_value": self.loss_value,
+            "loss_aux": self.loss_aux,
             "replay_buffer_size": self.replay_buffer_size,
             "current_temperature": self.current_temperature,
+            "current_max_turns": self.current_max_turns,
             "latest_checkpoint_path": self.latest_checkpoint_path,
             "reference_checkpoint_path": self.reference_checkpoint_path,
             "loss_history": self.loss_history if include_history else [],
@@ -72,6 +92,22 @@ class TrainingStatus:
             "forced_override_count": self.forced_override_count,
             "model_decision_count": self.model_decision_count,
             "forced_override_rate": self.forced_override_rate,
+            "tactical_opportunity_count": self.tactical_opportunity_count,
+            "tactical_blunder_count": self.tactical_blunder_count,
+            "tactical_blunder_rate": self.tactical_blunder_rate,
+            "win_opportunity_count": self.win_opportunity_count,
+            "missed_win_count": self.missed_win_count,
+            "missed_win_rate": self.missed_win_rate,
+            "block_opportunity_count": self.block_opportunity_count,
+            "missed_block_count": self.missed_block_count,
+            "missed_block_rate": self.missed_block_rate,
+            "training_wins": self.training_wins,
+            "training_losses": self.training_losses,
+            "training_draws": self.training_draws,
+            "training_win_rate": self.training_win_rate,
+            "training_loss_rate": self.training_loss_rate,
+            "training_draw_rate": self.training_draw_rate,
+            "avg_game_length": self.avg_game_length,
             "population_size": self.population_size,
             "leader_model_name": self.leader_model_name,
             "leader_model_elo": self.leader_model_elo,

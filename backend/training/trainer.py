@@ -207,6 +207,55 @@ class TrainingLoop:
         self.app_state.training_status.leader_model_name = leader.name
         self.app_state.training_status.leader_model_elo = leader.elo
 
+    def _refresh_training_rates(self):
+        status = self.app_state.training_status
+        status.forced_override_rate = (
+            status.forced_override_count / status.model_decision_count
+            if status.model_decision_count
+            else 0.0
+        )
+        status.tactical_blunder_rate = (
+            status.tactical_blunder_count / status.tactical_opportunity_count
+            if status.tactical_opportunity_count
+            else 0.0
+        )
+        status.missed_win_rate = (
+            status.missed_win_count / status.win_opportunity_count
+            if status.win_opportunity_count
+            else 0.0
+        )
+        status.missed_block_rate = (
+            status.missed_block_count / status.block_opportunity_count
+            if status.block_opportunity_count
+            else 0.0
+        )
+        total_games = status.training_wins + status.training_losses + status.training_draws
+        status.training_win_rate = status.training_wins / total_games if total_games else 0.0
+        status.training_loss_rate = status.training_losses / total_games if total_games else 0.0
+        status.training_draw_rate = status.training_draws / total_games if total_games else 0.0
+
+    def _record_training_result(self, result: SelfPlayResult):
+        status = self.app_state.training_status
+        status.games_played += 1
+        status.forced_override_count += result.forced_override_count
+        status.model_decision_count += result.model_decision_count
+        status.tactical_opportunity_count += result.tactical_opportunity_count
+        status.tactical_blunder_count += result.tactical_blunder_count
+        status.win_opportunity_count += result.win_opportunity_count
+        status.missed_win_count += result.missed_win_count
+        status.block_opportunity_count += result.block_opportunity_count
+        status.missed_block_count += result.missed_block_count
+        if result.winner is None:
+            status.training_draws += 1
+        elif result.winner == result.candidate_color:
+            status.training_wins += 1
+        else:
+            status.training_losses += 1
+        prior_games = max(status.games_played - 1, 0)
+        total_moves = (status.avg_game_length * prior_games) + result.move_count
+        status.avg_game_length = total_moves / status.games_played if status.games_played else 0.0
+        self._refresh_training_rates()
+
     def _set_reference_from_leader(self):
         leader = self._leader_member()
         self.reference_model.load_state_dict(leader.model.state_dict())
@@ -318,6 +367,8 @@ class TrainingLoop:
         status.iteration += 1
         status.entropy_warning = False
         temperature = self.scheduler.get_temperature(status.iteration)
+        turn_limit = self.config.turn_limit_for_iteration(status.iteration)
+        status.current_max_turns = turn_limit
         self._assign_lineage_roles()
         self._sync_serving_member()
         population_agents = {
@@ -330,7 +381,7 @@ class TrainingLoop:
         }
         leader_name = self._leader_member().name
         total_games = self.config.self_play_games_per_iteration
-        total_progress = total_games * self.config.max_turns_per_game
+        total_progress = total_games * turn_limit
         self._set_phase(
             "self_play",
             f"League self-play iteration {status.iteration}",
@@ -419,7 +470,7 @@ class TrainingLoop:
                 "opponent_elo": opponent["elo"],
                 "opponent_role": opponent.get("member").role if opponent.get("member") is not None else opponent["kind"],
                 "move_count": 0,
-                "max_turns": self.config.max_turns_per_game,
+                "max_turns": turn_limit,
                 "is_terminal": False,
                 "winner": None,
             }
@@ -502,14 +553,7 @@ class TrainingLoop:
                     self.replay_buffer.add(result.experiences)
                     self._apply_match_result(member, opponent, result)
                     status.episode += 1
-                    status.games_played += 1
-                    status.forced_override_count += result.forced_override_count
-                    status.model_decision_count += result.model_decision_count
-                    status.forced_override_rate = (
-                        status.forced_override_count / status.model_decision_count
-                        if status.model_decision_count
-                        else 0.0
-                    )
+                    self._record_training_result(result)
                     completed_games += 1
                     completed_move_count += result.move_count
                     status.entropy_warning = status.entropy_warning or result.entropy_warning
@@ -773,13 +817,21 @@ class TrainingLoop:
 
         avg_policy = sum(policy_losses) / len(policy_losses) if policy_losses else 0.0
         avg_value = sum(value_losses) / len(value_losses) if value_losses else 0.0
+        avg_aux = sum(aux_losses) / len(aux_losses) if aux_losses else 0.0
         self.app_state.training_status.loss_policy = avg_policy
         self.app_state.training_status.loss_value = avg_value
+        self.app_state.training_status.loss_aux = avg_aux
         self.app_state.training_status.loss_history.append(
             {
                 "iter": self.app_state.training_status.iteration,
                 "lp": avg_policy,
                 "lv": avg_value,
+                "la": avg_aux,
+                "br": self.app_state.training_status.tactical_blunder_rate,
+                "mwr": self.app_state.training_status.missed_win_rate,
+                "mbr": self.app_state.training_status.missed_block_rate,
+                "wr": self.app_state.training_status.training_win_rate,
+                "dr": self.app_state.training_status.training_draw_rate,
             }
         )
         self.app_state.training_status.loss_history = self.app_state.training_status.loss_history[-200:]
@@ -996,9 +1048,20 @@ class TrainingLoop:
             "iteration": self.app_state.training_status.iteration,
             "episode": self.app_state.training_status.episode,
             "games_played": self.app_state.training_status.games_played,
+            "loss_aux": self.app_state.training_status.loss_aux,
             "loss_history": self.app_state.training_status.loss_history,
             "forced_override_count": self.app_state.training_status.forced_override_count,
             "model_decision_count": self.app_state.training_status.model_decision_count,
+            "tactical_opportunity_count": self.app_state.training_status.tactical_opportunity_count,
+            "tactical_blunder_count": self.app_state.training_status.tactical_blunder_count,
+            "win_opportunity_count": self.app_state.training_status.win_opportunity_count,
+            "missed_win_count": self.app_state.training_status.missed_win_count,
+            "block_opportunity_count": self.app_state.training_status.block_opportunity_count,
+            "missed_block_count": self.app_state.training_status.missed_block_count,
+            "training_wins": self.app_state.training_status.training_wins,
+            "training_losses": self.app_state.training_status.training_losses,
+            "training_draws": self.app_state.training_status.training_draws,
+            "avg_game_length": self.app_state.training_status.avg_game_length,
             "reference_elo": self.reference_elo,
             "population": self._serialize_population(),
             "leader_model_name": leader.name,
@@ -1067,15 +1130,24 @@ class TrainingLoop:
         self.app_state.training_status.iteration = payload["iteration"]
         self.app_state.training_status.episode = payload["episode"]
         self.app_state.training_status.games_played = payload["games_played"]
+        self.app_state.training_status.current_max_turns = self.config.turn_limit_for_iteration(
+            self.app_state.training_status.iteration
+        )
+        self.app_state.training_status.loss_aux = payload.get("loss_aux", 0.0)
         self.app_state.training_status.loss_history = payload.get("loss_history", [])
         self.app_state.training_status.forced_override_count = payload.get("forced_override_count", 0)
         self.app_state.training_status.model_decision_count = payload.get("model_decision_count", 0)
-        self.app_state.training_status.forced_override_rate = (
-            self.app_state.training_status.forced_override_count
-            / self.app_state.training_status.model_decision_count
-            if self.app_state.training_status.model_decision_count
-            else 0.0
-        )
+        self.app_state.training_status.tactical_opportunity_count = payload.get("tactical_opportunity_count", 0)
+        self.app_state.training_status.tactical_blunder_count = payload.get("tactical_blunder_count", 0)
+        self.app_state.training_status.win_opportunity_count = payload.get("win_opportunity_count", 0)
+        self.app_state.training_status.missed_win_count = payload.get("missed_win_count", 0)
+        self.app_state.training_status.block_opportunity_count = payload.get("block_opportunity_count", 0)
+        self.app_state.training_status.missed_block_count = payload.get("missed_block_count", 0)
+        self.app_state.training_status.training_wins = payload.get("training_wins", 0)
+        self.app_state.training_status.training_losses = payload.get("training_losses", 0)
+        self.app_state.training_status.training_draws = payload.get("training_draws", 0)
+        self.app_state.training_status.avg_game_length = payload.get("avg_game_length", 0.0)
+        self._refresh_training_rates()
         self.app_state.training_status.latest_checkpoint_path = path
         self.app_state.training_status.reference_checkpoint_path = (
             path if payload.get("is_reference") else self.app_state.training_status.reference_checkpoint_path

@@ -39,12 +39,12 @@ class EvaluationManager:
         opponent_pool: OpponentPool,
         iteration: int,
     ) -> EvalMetrics:
-        versus_reference = self._match_agents(candidate_agent, reference_agent, self.config.eval_games)
-        versus_random = self._match_against_random(candidate_agent, max(self.config.eval_games // 4, 4))
+        versus_reference = self._match_agents(candidate_agent, reference_agent, self.config.eval_games, iteration)
+        versus_random = self._match_against_random(candidate_agent, max(self.config.eval_games // 4, 4), iteration)
         pool_win_rates = []
         for snapshot in opponent_pool.snapshots[:3]:
             pool_agent = opponent_pool.agent_from_snapshot(snapshot)
-            result = self._match_agents(candidate_agent, pool_agent, max(self.config.eval_games // 8, 2))
+            result = self._match_agents(candidate_agent, pool_agent, max(self.config.eval_games // 8, 2), iteration)
             pool_win_rates.append({"checkpoint": snapshot.path, "win_rate": result["win_rate"]})
 
         return EvalMetrics(
@@ -59,7 +59,7 @@ class EvaluationManager:
             was_promoted=False,
         )
 
-    def _match_agents(self, candidate_agent: ModelAgent, opponent_agent: ModelAgent, games: int) -> dict:
+    def _match_agents(self, candidate_agent: ModelAgent, opponent_agent: ModelAgent, games: int, iteration: int) -> dict:
         wins = 0
         losses = 0
         draws = 0
@@ -71,7 +71,10 @@ class EvaluationManager:
             for index in range(games):
                 candidate_color = "red" if index % 2 == 0 else "blue"
                 futures.append(
-                    (candidate_color, executor.submit(self._play_match, candidate_agent, opponent_agent, candidate_color))
+                    (
+                        candidate_color,
+                        executor.submit(self._play_match, candidate_agent, opponent_agent, candidate_color, iteration),
+                    )
                 )
             for candidate_color, future in futures:
                 winner, move_count = future.result()
@@ -95,7 +98,7 @@ class EvaluationManager:
             "avg_game_length": total_moves / games if games else 0.0,
         }
 
-    def _match_against_random(self, candidate_agent: ModelAgent, games: int) -> dict:
+    def _match_against_random(self, candidate_agent: ModelAgent, games: int, iteration: int) -> dict:
         random_baseline = RandomBaseline()
         wins = 0
         with ThreadPoolExecutor(max_workers=min(games, 4) or 1) as executor:
@@ -103,7 +106,10 @@ class EvaluationManager:
             for index in range(games):
                 candidate_color = "red" if index % 2 == 0 else "blue"
                 futures.append(
-                    (candidate_color, executor.submit(self._play_match, candidate_agent, random_baseline, candidate_color))
+                    (
+                        candidate_color,
+                        executor.submit(self._play_match, candidate_agent, random_baseline, candidate_color, iteration),
+                    )
                 )
             for candidate_color, future in futures:
                 winner, _ = future.result()
@@ -111,10 +117,11 @@ class EvaluationManager:
                     wins += 1
         return {"win_rate": wins / games if games else 0.0}
 
-    def _play_match(self, candidate_agent, opponent_agent, candidate_color: str) -> tuple[str | None, int]:
+    def _play_match(self, candidate_agent, opponent_agent, candidate_color: str, iteration: int) -> tuple[str | None, int]:
         state = GameState()
         move_count = 0
-        while not state.is_terminal and move_count < self.training_config.max_turns_per_game:
+        turn_limit = self.training_config.turn_limit_for_iteration(iteration)
+        while not state.is_terminal and move_count < turn_limit:
             current_agent = candidate_agent if state.current_player == candidate_color else opponent_agent
             if isinstance(current_agent, ModelAgent):
                 coord = current_agent.select_move(

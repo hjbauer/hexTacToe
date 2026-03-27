@@ -3,6 +3,7 @@ class TrainingPanel {
     this.wsClient = wsClient;
     this.spectatePanel = spectatePanel;
     this.chart = null;
+    this.tacticalChart = null;
     this.chartPromise = null;
     this.statsOpen = false;
     this.boundSocketOff = [];
@@ -138,9 +139,17 @@ class TrainingPanel {
     const summary = [
       ["Iteration", status.iteration ?? 0],
       ["Games", status.games_played ?? 0],
+      [
+        "W / L / D",
+        `${status.training_wins ?? 0} / ${status.training_losses ?? 0} / ${status.training_draws ?? 0}`,
+      ],
+      ["Avg Length", this.formatFloat(status.avg_game_length)],
+      ["Turn Limit", status.current_max_turns ?? 0],
       ["Population", status.population_size ?? 1],
       ["Replay Buffer", status.replay_buffer_size ?? 0],
-      ["Blunder Rate", this.asPercent(status.forced_override_rate)],
+      ["Blunder Rate", this.asPercent(status.tactical_blunder_rate)],
+      ["Missed Win Rate", this.asPercent(status.missed_win_rate)],
+      ["Missed Block Rate", this.asPercent(status.missed_block_rate)],
       ["Leader", `${status.leader_model_name || "model-1"} (${this.formatElo(status.leader_model_elo)})`],
     ];
     this.summaryEl.innerHTML = summary
@@ -175,14 +184,27 @@ class TrainingPanel {
       ["Episode", status.episode ?? 0],
       ["Policy Loss", this.formatFloat(status.loss_policy)],
       ["Value Loss", this.formatFloat(status.loss_value)],
+      ["Aux Loss", this.formatFloat(status.loss_aux)],
       ["Temperature", this.formatFloat(status.current_temperature)],
+      ["Turn Limit", status.current_max_turns ?? 0],
       ["Opponent Pool", status.opponent_pool_size ?? 0],
       ["Population", status.population_size ?? 1],
       ["Leader", `${status.leader_model_name || "model-1"} (${this.formatElo(status.leader_model_elo)})`],
       ["Entropy Warning", status.entropy_warning ? "Yes" : "No"],
-      ["Blunders", status.forced_override_count ?? 0],
+      ["W / L / D", `${status.training_wins ?? 0} / ${status.training_losses ?? 0} / ${status.training_draws ?? 0}`],
+      ["Avg Game Length", this.formatFloat(status.avg_game_length)],
+      ["Tactical Opportunities", status.tactical_opportunity_count ?? 0],
+      ["Blunders", status.tactical_blunder_count ?? 0],
+      ["Blunder Rate", this.asPercent(status.tactical_blunder_rate)],
+      ["Win Opportunities", status.win_opportunity_count ?? 0],
+      ["Missed Wins", status.missed_win_count ?? 0],
+      ["Missed Win Rate", this.asPercent(status.missed_win_rate)],
+      ["Block Opportunities", status.block_opportunity_count ?? 0],
+      ["Missed Blocks", status.missed_block_count ?? 0],
+      ["Missed Block Rate", this.asPercent(status.missed_block_rate)],
+      ["Selector Interventions", status.forced_override_count ?? 0],
       ["Model Decisions", status.model_decision_count ?? 0],
-      ["Blunder Rate", this.asPercent(status.forced_override_rate)],
+      ["Selector Rate", this.asPercent(status.forced_override_rate)],
     ];
     this.trainingStatsEl.innerHTML = trainingItems
       .map(([label, value]) => this.statCard(label, value))
@@ -223,6 +245,7 @@ class TrainingPanel {
       ]
     );
     this.updateChart(status.loss_history || []);
+    this.updateTacticalChart(status.loss_history || []);
   }
 
   updateChart(lossHistory) {
@@ -233,7 +256,23 @@ class TrainingPanel {
       this.chart.data.labels = lossHistory.map((item) => item.iter);
       this.chart.data.datasets[0].data = lossHistory.map((item) => item.lp);
       this.chart.data.datasets[1].data = lossHistory.map((item) => item.lv);
+      this.chart.data.datasets[2].data = lossHistory.map((item) => item.la ?? 0);
       this.chart.update("none");
+    });
+  }
+
+  updateTacticalChart(lossHistory) {
+    this.ensureChart().then((ready) => {
+      if (!ready || !this.tacticalChart) {
+        return;
+      }
+      this.tacticalChart.data.labels = lossHistory.map((item) => item.iter);
+      this.tacticalChart.data.datasets[0].data = lossHistory.map((item) => item.br ?? 0);
+      this.tacticalChart.data.datasets[1].data = lossHistory.map((item) => item.mwr ?? 0);
+      this.tacticalChart.data.datasets[2].data = lossHistory.map((item) => item.mbr ?? 0);
+      this.tacticalChart.data.datasets[3].data = lossHistory.map((item) => item.wr ?? 0);
+      this.tacticalChart.data.datasets[4].data = lossHistory.map((item) => item.dr ?? 0);
+      this.tacticalChart.update("none");
     });
   }
 
@@ -265,6 +304,7 @@ class TrainingPanel {
         datasets: [
           { label: "Policy", data: [], borderColor: "#c2472d", tension: 0.2, pointRadius: 0 },
           { label: "Value", data: [], borderColor: "#275d8b", tension: 0.2, pointRadius: 0 },
+          { label: "Aux", data: [], borderColor: "#4d7f39", tension: 0.2, pointRadius: 0 },
         ],
       },
       options: {
@@ -273,6 +313,36 @@ class TrainingPanel {
         maintainAspectRatio: false,
         plugins: { legend: { display: true } },
         scales: { x: { display: false } },
+      },
+    });
+    const tacticalCtx = document.getElementById("tacticalChart").getContext("2d");
+    this.tacticalChart = new window.Chart(tacticalCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [
+          { label: "Blunder", data: [], borderColor: "#7d271e", tension: 0.2, pointRadius: 0 },
+          { label: "Missed Win", data: [], borderColor: "#c78d24", tension: 0.2, pointRadius: 0 },
+          { label: "Missed Block", data: [], borderColor: "#305c8a", tension: 0.2, pointRadius: 0 },
+          { label: "Win Rate", data: [], borderColor: "#2f7b4b", tension: 0.2, pointRadius: 0 },
+          { label: "Draw Rate", data: [], borderColor: "#7b6d5b", tension: 0.2, pointRadius: 0 },
+        ],
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: true } },
+        scales: {
+          x: { display: false },
+          y: {
+            min: 0,
+            max: 1,
+            ticks: {
+              callback: (value) => `${Math.round(value * 100)}%`,
+            },
+          },
+        },
       },
     });
     return true;
@@ -285,6 +355,10 @@ class TrainingPanel {
     if (this.chart) {
       this.chart.destroy();
       this.chart = null;
+    }
+    if (this.tacticalChart) {
+      this.tacticalChart.destroy();
+      this.tacticalChart = null;
     }
   }
 

@@ -71,7 +71,10 @@ class TrainingConfig:
     checkpoint_historical_samples: int = 256
     checkpoint_member_recent_samples: int = 256
     checkpoint_member_historical_samples: int = 64
-    max_turns_per_game: int = 200
+    max_turns_per_game: int = 280
+    initial_max_turns_per_game: int = 180
+    max_turn_growth_interval: int = 20
+    max_turn_growth_step: int = 10
     population_size: int = 6
     lineage_count: int = 3
     initial_elo: float = 1200.0
@@ -135,3 +138,13 @@ class TrainingConfig:
         data["eval"] = self.eval.to_dict()
         data["exploration"] = self.exploration.to_dict()
         return data
+
+    def turn_limit_for_iteration(self, iteration: int) -> int:
+        base = min(self.initial_max_turns_per_game, self.max_turns_per_game)
+        if self.max_turn_growth_interval <= 0 or self.max_turn_growth_step <= 0:
+            return self.max_turns_per_game
+        growth_steps = max(iteration, 0) // self.max_turn_growth_interval
+        return min(
+            self.max_turns_per_game,
+            base + (growth_steps * self.max_turn_growth_step),
+        )

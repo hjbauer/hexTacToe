@@ -47,6 +47,12 @@ class SelfPlayResult:
     entropy_warning: bool
     forced_override_count: int
     model_decision_count: int
+    tactical_opportunity_count: int
+    tactical_blunder_count: int
+    win_opportunity_count: int
+    missed_win_count: int
+    block_opportunity_count: int
+    missed_block_count: int
     final_snapshot: dict | None = None
 
 
@@ -108,6 +114,9 @@ class SelfPlayWorker:
         self.opponent_override = opponent_override
         self.candidate_label = candidate_label
 
+    def _turn_limit(self, iteration: int) -> int:
+        return self.config.turn_limit_for_iteration(iteration)
+
     def _sample_opponent(self):
         weights = self.config.opponent_sampling_weights
         choices = ["reference", "pool", "random"]
@@ -130,6 +139,7 @@ class SelfPlayWorker:
     def play_game(self, iteration: int, game_id: str = "spectate") -> SelfPlayResult:
         state = GameState()
         move_count = 0
+        max_turns = self._turn_limit(iteration)
         candidate_color = "red" if random.random() < 0.5 else "blue"
         if self.opponent_override is not None:
             opponent_type, opponent_agent = self.opponent_override
@@ -139,8 +149,14 @@ class SelfPlayWorker:
         entropy_warning = False
         forced_override_count = 0
         model_decision_count = 0
+        tactical_opportunity_count = 0
+        tactical_blunder_count = 0
+        win_opportunity_count = 0
+        missed_win_count = 0
+        block_opportunity_count = 0
+        missed_block_count = 0
 
-        while not state.is_terminal and move_count < self.config.max_turns_per_game:
+        while not state.is_terminal and move_count < max_turns:
             if self.stop_requested is not None and self.stop_requested():
                 break
             moving_player = state.current_player
@@ -196,10 +212,21 @@ class SelfPlayWorker:
                     policy_for_record = inference.forced_policy or inference.policy
                     if state.current_player == candidate_color:
                         model_decision_count += 1
+                        if forced is not None:
+                            tactical_opportunity_count += 1
+                            if forced.reason in {"win_now", "win_this_turn"}:
+                                win_opportunity_count += 1
+                            elif forced.reason in {"block_now", "block_next_turn"}:
+                                block_opportunity_count += 1
                         if inference.was_overridden:
                             forced_override_count += 1
                             forced_override_applied = True
                             forced_override_reason = inference.override_reason
+                            tactical_blunder_count += 1
+                            if inference.override_reason in {"win_now", "win_this_turn"}:
+                                missed_win_count += 1
+                            elif inference.override_reason in {"block_now", "block_next_turn"}:
+                                missed_block_count += 1
                 else:
                     coord = current_agent.select_move(state)
                     policy_for_record = forced.policy if forced is not None else heuristic_policy(state)
@@ -209,15 +236,13 @@ class SelfPlayWorker:
             move_count += 1
 
             if moving_player == candidate_color:
-                immediate_reward, tactical_blunder = self._immediate_reward(
+                immediate_reward, _tactical_blunder = self._immediate_reward(
                     previous_state,
                     coord,
                     state,
                     forced_override_applied=forced_override_applied,
                     forced_override_reason=forced_override_reason,
                 )
-                if tactical_blunder:
-                    forced_override_count += 1
                 recorded.append(
                     CandidateTurnRecord(
                         state=previous_state,
@@ -251,7 +276,7 @@ class SelfPlayWorker:
                         "candidate_color": candidate_color,
                         "opponent_color": "blue" if candidate_color == "red" else "red",
                         "move_count": move_count,
-                        "max_turns": self.config.max_turns_per_game,
+                        "max_turns": max_turns,
                     }
                 )
 
@@ -287,6 +312,12 @@ class SelfPlayWorker:
             entropy_warning=entropy_warning,
             forced_override_count=forced_override_count,
             model_decision_count=model_decision_count,
+            tactical_opportunity_count=tactical_opportunity_count,
+            tactical_blunder_count=tactical_blunder_count,
+            win_opportunity_count=win_opportunity_count,
+            missed_win_count=missed_win_count,
+            block_opportunity_count=block_opportunity_count,
+            missed_block_count=missed_block_count,
             final_snapshot={
                 "type": "spectate_move",
                 "game_id": game_id,
@@ -302,7 +333,7 @@ class SelfPlayWorker:
                 "candidate_color": candidate_color,
                 "opponent_color": "blue" if candidate_color == "red" else "red",
                 "move_count": move_count,
-                "max_turns": self.config.max_turns_per_game,
+                "max_turns": max_turns,
             },
         )
 

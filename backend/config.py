@@ -49,7 +49,7 @@ class TrainingConfig:
     eval: EvalConfig = field(default_factory=EvalConfig)
     exploration: ExplorationConfig = field(default_factory=ExplorationConfig)
     device: str = "auto"
-    self_play_device: str = "cpu"
+    self_play_device: str = "auto"
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0

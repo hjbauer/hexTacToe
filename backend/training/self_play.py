@@ -552,6 +552,10 @@ def _build_model_agent(config: TrainingConfig, state_dict: dict) -> ModelAgent:
     if torch is None:
         raise RuntimeError("torch is required for process self-play")
     device = getattr(config, "self_play_device", "cpu")
+    if device == "auto":
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    elif device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
     model = HexGNNModel(config.model).to(device)
     model.load_state_dict(state_dict, strict=False)
     return ModelAgent(model, device)

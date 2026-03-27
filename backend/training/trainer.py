@@ -68,6 +68,7 @@ class TrainingLoop:
         self.app_state = app_state
         self.config = config or TrainingConfig()
         self.device = self._resolve_device(self.config.device)
+        self.self_play_device = self._resolve_self_play_device(self.config.self_play_device)
         self._use_mixed_precision = (
             self.device.startswith("cuda")
             and torch.cuda.is_available()
@@ -98,7 +99,7 @@ class TrainingLoop:
         self.opponent_pool = OpponentPool(
             model_config=self.config.model,
             max_size=self.config.eval.opponent_pool_max_size,
-            device=self.device,
+            device=self.self_play_device,
         )
         self.evaluator = EvaluationManager(self.config.eval, self.config)
         self.scheduler = ExplorationScheduler(self.config.exploration)
@@ -119,6 +120,16 @@ class TrainingLoop:
         if requested.startswith("cuda") and not torch.cuda.is_available():
             return "cpu"
         return requested
+
+    def _resolve_self_play_device(self, requested: str) -> str:
+        if requested == "auto":
+            return self.device if self.device.startswith("cuda") else "cpu"
+        if requested.startswith("cuda") and not torch.cuda.is_available():
+            return "cpu"
+        return requested
+
+    def _use_threaded_self_play(self) -> bool:
+        return self.self_play_device.startswith("cuda")
 
     def _new_model(self) -> HexGNNModel:
         return HexGNNModel(self.config.model).to(self.device)
@@ -390,7 +401,7 @@ class TrainingLoop:
         self._assign_lineage_roles()
         self._sync_serving_member()
         population_agents = {
-            member.name: ModelAgent(member.model, self.device)
+            member.name: ModelAgent(member.model, self.self_play_device if self._use_threaded_self_play() else self.device)
             for member in self.population
         }
         population_state_dicts = {
@@ -433,7 +444,7 @@ class TrainingLoop:
             opponent = entry["opponent"]
             worker = SelfPlayWorker(
                 candidate_agent=population_agents[member.name],
-                reference_agent=ModelAgent(self.reference_model, self.device),
+                reference_agent=ModelAgent(self.reference_model, self.self_play_device),
                 opponent_pool=self.opponent_pool,
                 config=self.config,
                 spectate_callback=self._broadcast_spectate,
@@ -500,7 +511,9 @@ class TrainingLoop:
                 "opponent": opponent,
                 "game_id": game_id,
             }
-            use_local = active_local_games < min(self.config.local_spectate_games_per_batch, worker_count)
+            use_local = self._use_threaded_self_play() or (
+                active_local_games < min(self.config.local_spectate_games_per_batch, worker_count)
+            )
             if use_local:
                 active_local_games += 1
                 entry["execution"] = "local"
@@ -663,7 +676,7 @@ class TrainingLoop:
                 "kind": "reference",
                 "name": "reference",
                 "elo": self.reference_elo,
-                "agent": ModelAgent(self.reference_model, self.device),
+                "agent": ModelAgent(self.reference_model, self.self_play_device),
                 "state_dict": copy.deepcopy(self.reference_model.state_dict()),
                 "member": None,
             }

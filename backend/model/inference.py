@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 from typing import Optional
 
 import numpy as np
@@ -31,6 +32,7 @@ class ModelAgent:
         self.model = model
         self.device = device
         self.graph_builder = GraphBuilder()
+        self._model_lock = Lock()
 
     def select_move(
         self,
@@ -49,8 +51,9 @@ class ModelAgent:
         data = self.graph_builder.build_data(state)
         data = data.to(self.device)
         self.model.eval()
-        with torch.no_grad():
-            logits, _, _ = self.model(data)
+        with self._model_lock:
+            with torch.no_grad():
+                logits, _, _ = self.model(data)
         legal_mask = data.legal_mask.detach().cpu().numpy()
         coords = data.node_coords.detach().cpu().numpy()
         legal_logits = logits.detach().cpu().numpy()[legal_mask]
